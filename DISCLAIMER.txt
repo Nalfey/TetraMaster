@@ -1,0 +1,87 @@
+TETRAMASTER — FAN PROJECT LEGAL DISCLAIMER
+============================================
+
+Last updated: June 2026
+
+1. OWNERSHIP OF INTELLECTUAL PROPERTY
+-----------------------------------
+
+Tetra Master is a minigame originally created by and owned by Square Enix Co., Ltd.
+and/or its affiliates and licensors (collectively, "Square Enix").
+
+All rights, title, and interest in and to the original Tetra Master game and related
+intellectual property — including but not limited to:
+
+  • artwork, graphics, sprites, and other visual assets;
+  • sound effects, music, and other audio assets;
+  • game logic, mechanics, rules, and gameplay systems;
+  • names, characters, terminology, and branding;
+  • and any other creative or proprietary elements associated with Tetra Master
+    or the FINAL FANTASY franchise,
+
+remain the exclusive property of Square Enix. Nothing in this project transfers,
+assigns, or grants any ownership interest in such materials.
+
+2. NATURE OF THIS PROJECT
+-------------------------
+
+This software ("TetraMaster") is an unofficial, non-commercial fan implementation
+created by fans for fans. It is not affiliated with, endorsed by, sponsored by,
+or approved by Square Enix.
+
+This project is intended solely as a respectful homage that attempts to reproduce
+the look, feel, and behavior of the original Tetra Master experience as faithfully
+as practicable within the scope of a fan recreation. Any resemblance to Square Enix
+materials is intentional only insofar as it reflects that goal of faithful homage.
+
+3. NON-COMMERCIAL USE
+---------------------
+
+This implementation is provided free of charge. The authors and contributors:
+
+  • do not sell, license for a fee, or otherwise monetize this project;
+  • do not accept payment, donations, subscriptions, advertising revenue, or
+    any other form of compensation in connection with this project;
+  • do not use this project to generate income, profit, or commercial advantage;
+  • and have no present intention to do any of the foregoing.
+
+Distribution is limited to no-cost, personal, non-commercial use.
+
+4. NO WARRANTY
+--------------
+
+This software is provided "AS IS", without warranty of any kind, express or implied,
+including but not limited to warranties of merchantability, fitness for a particular
+purpose, and non-infringement. Use is at your own risk.
+
+5. LIMITATION OF LIABILITY
+--------------------------
+
+To the fullest extent permitted by applicable law, the authors and contributors
+shall not be liable for any claim, damage, loss, or other liability arising from
+use of this software.
+
+6. TAKEDOWN AND COMPLIANCE
+--------------------------
+
+Square Enix retains all rights to its intellectual property. If Square Enix or its
+authorized representatives request modification, restriction, or removal of this
+project, the authors intend to comply promptly and in good faith.
+
+If you are a rights holder and believe this project infringes your rights, please
+contact the project maintainer so the matter can be addressed.
+
+7. THIRD-PARTY SOFTWARE
+-----------------------
+
+This project may include or depend on third-party software (for example, the LÖVE
+game framework) subject to its own license terms. Such components remain the
+property of their respective owners and are used in accordance with their licenses.
+
+8. ACKNOWLEDGMENT
+-----------------
+
+FINAL FANTASY, Tetra Master, and related marks are trademarks or registered
+trademarks of Square Enix Co., Ltd.
+
+All other trademarks are the property of their respective owners.
