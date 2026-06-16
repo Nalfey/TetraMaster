@@ -1,7 +1,7 @@
 function love.conf(t)
     t.identity = "tetramaster"
     t.version = "11.5"
-    t.console = true
+    t.console = false
     t.background = true
 
     t.window.title = "TetraMaster"

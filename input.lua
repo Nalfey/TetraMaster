@@ -93,6 +93,10 @@ function draw_game_cursor()
 end
 
 function handle_keyboard(key)
+  if is_quit_prompt_active() then
+    return false
+  end
+
   if is_coin_toss_active() or is_endgame() then
     return false
   end

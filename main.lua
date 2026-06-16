@@ -2,24 +2,30 @@ require("protocol")
 local bridge = require("bridge")
 require("audio")
 require("battle")
+require("capture_fx")
 require("place_card")
 require("init")
 require("input")
 require("coin_toss")
 require("end_game_text")
+require("quit_prompt")
 
 require("card")
 require("hand")
 require("duel")
 require("game")
 
-local function log_boot_error(err)
-  local log_path = (os.getenv("USERPROFILE") or ".") .. "/Desktop/Windower4/addons/TetraMaster/sync/boot_error.log"
+local function log_runtime_error(err)
+  local log_path = (os.getenv("USERPROFILE") or ".") .. "/Desktop/Windower4/addons/TetraMaster/sync/runtime_error.log"
   local file = io.open(log_path, "a")
   if file then
     file:write(os.date("%Y-%m-%d %H:%M:%S") .. "\n" .. tostring(err) .. "\n\n")
     file:close()
   end
+end
+
+local function log_boot_error(err)
+  log_runtime_error(err)
 end
 
 function love.load()
@@ -40,6 +46,10 @@ function love.load()
 end
 
 function love.quit()
+  if love_wants_to_quit() then
+    return true
+  end
+
   if is_duel_active() then
     duel_send_resign()
   end
@@ -56,11 +66,18 @@ function love.draw()
 end
 
 function love.update(dt)
+  local ok, err = pcall(function()
     if is_duel_active() then
       duel_poll()
     end
 
     Game:update(dt)
+  end)
+
+  if not ok then
+    log_runtime_error(debug.traceback(err, 2))
+    error(err)
+  end
 end
 
 function love.focus(focus)
@@ -74,13 +91,23 @@ function love.keypressed(key, scancode, isrepeat)
     return
   end
 
+  if handle_quit_prompt_key(key) then
+    return
+  end
+
   if handle_keyboard(key) then
     return
   end
 
   if key == "escape" then
+    if is_duel_active() then
+      request_duel_quit()
+      return
+    end
+
     play_sound("escape")
-    love.event.quit()
+    force_app_quit()
+    return
   end
 
   if key == "l" then

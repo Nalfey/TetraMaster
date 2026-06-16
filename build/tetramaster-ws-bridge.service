@@ -1,0 +1,20 @@
+[Unit]
+Description=TetraMaster WebSocket bridge (Cloudflare Tunnel front-end)
+After=network-online.target tetramaster-relay.service
+Wants=network-online.target
+Requires=tetramaster-relay.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/tetramaster/bin
+Environment=TM_WS_BIND=127.0.0.1
+Environment=TM_WS_PORT=8080
+Environment=TM_WS_RELAY_HOST=127.0.0.1
+Environment=TM_WS_RELAY_PORT=19876
+ExecStart=/opt/tetramaster/venv/bin/python /opt/tetramaster/bin/ws_bridge.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

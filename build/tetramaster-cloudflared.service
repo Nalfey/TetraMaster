@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloudflare Tunnel for TetraMaster relay
+After=network-online.target tetramaster-ws-bridge.service
+Wants=network-online.target
+Requires=tetramaster-ws-bridge.service
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/local/bin/cloudflared --config /opt/tetramaster/config/config.yml tunnel run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -32,6 +32,8 @@ $excludeNames = @(
     "build",
     "dist",
     "runtime",
+    "relay",
+    "tools",
     ".git",
     ".cursor",
     "README.md",

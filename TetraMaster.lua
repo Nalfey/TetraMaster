@@ -1,7 +1,7 @@
 _addon = {
     name = 'TetraMaster',
     author = 'Nalfey',
-    version = '1.1.1',
+    version = '1.1.5',
     description = 'Launch Tetra Master and duel party members.',
 }
 
@@ -14,6 +14,10 @@ local exe_name = 'TetraMaster.exe'
 local pending_challenge = nil
 local pending_connect = nil
 local notified_challenges = {}
+local host_connect_ip_override = nil
+local relay_host_override = nil
+local DEFAULT_RELAY_HOST = 'relay.tetramasters.uk'
+local RELAY_DOMAIN = 'tetramasters.uk'
 
 local function chat(msg)
     windower.add_to_chat(207, 'TetraMaster: ' .. msg)
@@ -74,7 +78,15 @@ local function announce_challenge(challenger, target)
     send_party_line(challenger .. ' challenges ' .. target .. ' to a TetraMaster duel!')
 end
 
-local function send_handshake(kind, ...)
+local function announce_accept(guest_name)
+    send_party_line(guest_name .. ' accepts the duel!')
+end
+
+local function announce_decline(guest_name)
+    send_party_line(guest_name .. ' declines the TetraMaster duel.')
+end
+
+local function send_ipc_handshake(kind, ...)
     windower.send_ipc_message(protocol.format_ipc(kind, ...))
 end
 
@@ -101,7 +113,7 @@ local function launch_solo()
     chat('launching solo game...')
 end
 
-local function launch_duel(role, session_id, my_role, peer_name, host_ip, port)
+local function build_duel_args(role, session_id, my_role, peer_name, host_ip, port)
     local me = player_name() or 'player'
     local args = {
         '--duel',
@@ -119,10 +131,53 @@ local function launch_duel(role, session_id, my_role, peer_name, host_ip, port)
         args[#args + 1] = tostring(port or protocol.DEFAULT_PORT)
     end
 
-    if duel_bridge.launch_game(args) then
+    return args
+end
+
+local function launch_duel(role, session_id, my_role, peer_name, host_ip, port)
+    if duel_bridge.launch_game(build_duel_args(role, session_id, my_role, peer_name, host_ip, port)) then
         chat('launching duel (' .. role .. ')...')
     else
         duel_bridge.shutdown('launch_failed')
+    end
+end
+
+local function is_relay_connect(host)
+    if not host or host == '' then
+        return false
+    end
+    local lower = host:lower()
+    if lower == DEFAULT_RELAY_HOST:lower() or lower == '145.241.251.131' then
+        return true
+    end
+    if lower == RELAY_DOMAIN or lower:sub(-#('.' .. RELAY_DOMAIN)) == '.' .. RELAY_DOMAIN then
+        return true
+    end
+    if relay_host_override and relay_host_override ~= false and host == relay_host_override then
+        return true
+    end
+    return false
+end
+
+local function get_relay_host()
+    if relay_host_override == false then
+        return nil
+    end
+    return relay_host_override or DEFAULT_RELAY_HOST
+end
+
+local function relay_port_for(host)
+    if protocol.should_use_wss(host) then
+        return protocol.DEFAULT_WSS_PORT
+    end
+    return protocol.DEFAULT_PORT
+end
+
+local function start_relay_duel(session_id, local_name, peer_name, relay_host, port, tcp_role)
+    local game_role = tcp_role == 'host' and 'challenger' or 'guest'
+    local game_args = build_duel_args(tcp_role, session_id, game_role, peer_name, relay_host, port)
+    if duel_bridge.start_relay(session_id, peer_name, tcp_role, relay_host, port, local_name, game_args) then
+        chat('waiting for relay (' .. tcp_role .. ')...')
     end
 end
 
@@ -137,6 +192,21 @@ local function start_guest_duel(session_id, guest, challenger, host_ip, port)
     end
 end
 
+local function begin_duel_as_host(challenge)
+    if duel_bridge.is_active() then
+        return
+    end
+
+    local relay_host = get_relay_host()
+    if relay_host then
+        start_relay_duel(challenge.session_id, challenge.challenger, challenge.guest, relay_host, relay_port_for(relay_host), 'host')
+    else
+        local host_ip = duel_bridge.get_connect_ip(host_connect_ip_override)
+        start_host_duel(challenge.session_id, challenge.challenger, challenge.guest, port)
+        send_ipc_handshake('CONNECT', challenge.session_id, host_ip, port)
+    end
+end
+
 local function set_pending_challenge(session_id, challenger, guest)
     pending_challenge = {
         session_id = session_id,
@@ -147,13 +217,14 @@ local function set_pending_challenge(session_id, challenger, guest)
 end
 
 local function notify_guest_challenge(session_id, challenger, guest)
-    if notified_challenges[session_id] and pending_challenge and pending_challenge.session_id == session_id then
+    local session_key = session_id:lower()
+    if notified_challenges[session_key] and pending_challenge and protocol.sessions_equal(pending_challenge.session_id, session_id) then
         set_pending_challenge(session_id, challenger, guest)
         return
     end
 
     set_pending_challenge(session_id, challenger, guest)
-    notified_challenges[session_id] = true
+    notified_challenges[session_key] = true
     chat(challenger .. ' challenged you to a TetraMaster duel!')
     chat('Type //tm accept or //tm decline')
 end
@@ -175,8 +246,12 @@ local function issue_challenge(target_name)
     set_pending_challenge(session_id, me, target_name)
 
     announce_challenge(me, target_name)
-    send_handshake('CHALLENGE', session_id, me, target_name)
+    send_ipc_handshake('CHALLENGE', session_id, me, target_name)
     chat('challenge sent to ' .. target_name .. '. Waiting for accept...')
+    if not get_relay_host() then
+        chat('host: allow TCP ' .. protocol.DEFAULT_PORT .. ' in Windows Firewall.')
+        chat('and forward port ' .. protocol.DEFAULT_PORT .. ' on your router, or use Tailscale with //tm hostip <ip>.')
+    end
 end
 
 local function accept_challenge()
@@ -193,10 +268,18 @@ local function accept_challenge()
 
     local challenge = pending_challenge
     pending_challenge = nil
-    pending_connect = challenge
 
-    send_handshake('ACCEPT', challenge.session_id, me)
-    chat('accepted. Waiting for ' .. challenge.challenger .. ' to host the duel...')
+    announce_accept(me)
+    send_ipc_handshake('ACCEPT', challenge.session_id, me)
+
+    local relay_host = get_relay_host()
+    if relay_host then
+        start_relay_duel(challenge.session_id, challenge.guest, challenge.challenger, relay_host, relay_port_for(relay_host), 'guest')
+        chat('accepted. Connecting to relay...')
+    else
+        pending_connect = challenge
+        chat('accepted. Waiting for ' .. challenge.challenger .. ' to host the duel...')
+    end
 end
 
 local function decline_challenge()
@@ -213,7 +296,8 @@ local function decline_challenge()
 
     local challenge = pending_challenge
     pending_challenge = nil
-    send_handshake('DECLINE', challenge.session_id, challenge.challenger)
+    announce_decline(me)
+    send_ipc_handshake('DECLINE', challenge.session_id, challenge.challenger)
     chat('duel declined.')
 end
 
@@ -233,7 +317,7 @@ local function handle_tm_message(msg)
     end
 
     if msg.kind == 'ACCEPT' then
-        if not pending_challenge or pending_challenge.session_id ~= msg.session then
+        if not pending_challenge or not protocol.sessions_equal(pending_challenge.session_id, msg.session) then
             return
         end
 
@@ -243,16 +327,12 @@ local function handle_tm_message(msg)
 
         local challenge = pending_challenge
         pending_challenge = nil
-
-        local port = protocol.DEFAULT_PORT
-        local host_ip = duel_bridge.get_local_ip()
-        start_host_duel(challenge.session_id, challenge.challenger, challenge.guest, port)
-        send_handshake('CONNECT', challenge.session_id, host_ip, port)
+        begin_duel_as_host(challenge)
         return
     end
 
     if msg.kind == 'CONNECT' then
-        if not pending_connect or pending_connect.session_id ~= msg.session then
+        if not pending_connect or not protocol.sessions_equal(pending_connect.session_id, msg.session) then
             return
         end
 
@@ -263,14 +343,18 @@ local function handle_tm_message(msg)
         local challenge = pending_connect
         pending_connect = nil
 
-        local host_ip = msg.arg1
-        local port = tonumber(msg.arg2) or protocol.DEFAULT_PORT
-        start_guest_duel(challenge.session_id, challenge.guest, challenge.challenger, host_ip, port)
+        local connect_host = msg.arg1
+        local port = tonumber(msg.arg2) or relay_port_for(connect_host)
+        if is_relay_connect(connect_host) then
+            start_relay_duel(challenge.session_id, challenge.guest, challenge.challenger, connect_host, port, 'guest')
+        else
+            start_guest_duel(challenge.session_id, challenge.guest, challenge.challenger, connect_host, port)
+        end
         return
     end
 
     if msg.kind == 'DECLINE' then
-        if pending_challenge and pending_challenge.session_id == msg.session then
+        if pending_challenge and protocol.sessions_equal(pending_challenge.session_id, msg.session) then
             if me:lower() == pending_challenge.challenger:lower() then
                 pending_challenge = nil
                 chat(msg.arg1 .. ' declined your duel.')
@@ -280,10 +364,47 @@ local function handle_tm_message(msg)
     end
 
     if msg.kind == 'RESIGN' then
-        if duel_bridge.is_active() and duel_bridge.get_session_id() == msg.session then
+        if duel_bridge.is_active() and protocol.sessions_equal(duel_bridge.get_session_id(), msg.session) then
             duel_bridge.shutdown('opponent_left')
         end
     end
+end
+
+local function handle_friendly_accept(accepter)
+    local me = player_name()
+    if not me or not accepter or not pending_challenge then
+        return
+    end
+
+    if me:lower() ~= pending_challenge.challenger:lower() then
+        return
+    end
+
+    if pending_challenge.guest:lower() ~= accepter:lower() then
+        return
+    end
+
+    local challenge = pending_challenge
+    pending_challenge = nil
+    begin_duel_as_host(challenge)
+end
+
+local function handle_friendly_decline(decliner)
+    local me = player_name()
+    if not me or not decliner or not pending_challenge then
+        return
+    end
+
+    if me:lower() ~= pending_challenge.challenger:lower() then
+        return
+    end
+
+    if pending_challenge.guest:lower() ~= decliner:lower() then
+        return
+    end
+
+    pending_challenge = nil
+    chat(decliner .. ' declined your duel.')
 end
 
 local function clear_duel_state()
@@ -303,18 +424,24 @@ duel_bridge.set_session_end_handler(function(reason)
 end)
 
 local function handle_incoming_text(text)
-    local msg = protocol.parse_handshake(text)
-    if msg then
-        handle_tm_message(msg)
-        return
-    end
-
     local challenger, guest = protocol.parse_friendly_challenge(text)
     if challenger and guest then
         local me = player_name()
         if me and me:lower() == guest:lower() then
             notify_guest_challenge(protocol.make_session_id(challenger, guest), challenger, guest)
         end
+        return
+    end
+
+    local accepter = protocol.parse_friendly_accept(text)
+    if accepter then
+        handle_friendly_accept(accepter)
+        return
+    end
+
+    local decliner = protocol.parse_friendly_decline(text)
+    if decliner then
+        handle_friendly_decline(decliner)
     end
 end
 
@@ -330,6 +457,25 @@ local function handle_command(command, ...)
             return
         end
         issue_challenge(args[1])
+    elseif command == 'hostip' then
+        if not args[1] or args[1]:lower() == 'clear' then
+            host_connect_ip_override = nil
+            chat('host connect IP cleared (auto-detect on next duel).')
+        else
+            host_connect_ip_override = args[1]
+            chat('host will advertise ' .. args[1] .. ' when the duel starts.')
+        end
+    elseif command == 'relayhost' then
+        if not args[1] or args[1]:lower() == 'clear' then
+            relay_host_override = nil
+            chat('relay host reset to default (' .. DEFAULT_RELAY_HOST .. ').')
+        elseif args[1]:lower() == 'direct' then
+            relay_host_override = false
+            chat('using direct host connection (no relay).')
+        else
+            relay_host_override = args[1]
+            chat('relay host set to ' .. args[1])
+        end
     elseif command == 'accept' then
         accept_challenge()
     elseif command == 'decline' then
@@ -337,7 +483,7 @@ local function handle_command(command, ...)
     elseif command == 'resign' then
         if duel_bridge.is_active() then
             local session_id = duel_bridge.get_session_id()
-            send_handshake('RESIGN', session_id, player_name() or 'unknown')
+            send_ipc_handshake('RESIGN', session_id, player_name() or 'unknown')
             duel_bridge.shutdown('manual_resign')
             chat('you resigned from the duel.')
         else
@@ -346,6 +492,11 @@ local function handle_command(command, ...)
     elseif command == 'help' then
         chat('//tm play - solo game')
         chat('//tm duel <name> - challenge a party member')
+        chat('//tm relayhost <host> - relay server (default ' .. DEFAULT_RELAY_HOST .. ', uses wss on domains)')
+        chat('//tm relayhost direct - connect guest to host PC instead')
+        chat('//tm relayhost clear - reset relay host to default')
+        chat('//tm hostip <ip> - host advertises this IP (direct mode / Tailscale)')
+        chat('//tm hostip clear - use auto IP again')
         chat('//tm accept / //tm decline - respond to a challenge')
         chat('//tm resign - leave an active duel')
         chat('//tm help - show this message')

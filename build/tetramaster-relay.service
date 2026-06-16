@@ -1,0 +1,17 @@
+[Unit]
+Description=TetraMaster duel relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/tetramaster/bin
+ExecStart=/usr/bin/lua5.4 /opt/tetramaster/bin/relay.lua
+Restart=on-failure
+RestartSec=5
+Environment=TM_RELAY_BIND=127.0.0.1
+Environment=TM_RELAY_PORT=19876
+
+[Install]
+WantedBy=multi-user.target

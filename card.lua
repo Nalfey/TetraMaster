@@ -2,6 +2,17 @@ local class = require("libs/middleclass/middleclass")
 
 Card = class("Card")
 
+local function roll_hidden_stat(digit_value)
+  local base = digit_value * 16
+  return math.random(base, base + 15)
+end
+
+local function init_hidden_stats(card)
+  card.hidden_attack = roll_hidden_stat(card.attack)
+  card.hidden_physical_defense = roll_hidden_stat(card.physical_defense)
+  card.hidden_magical_defense = roll_hidden_stat(card.magical_defense)
+end
+
 function Card:initialize(base_card, side)
     if not self:check_base_card(base_card) then
         return false
@@ -37,6 +48,8 @@ function Card:initialize(base_card, side)
             self.arrows[v] = true
         end
     end
+
+    init_hidden_stats(self)
 end
 
 function Card:check_base_card(base_card)
@@ -71,6 +84,14 @@ function Card.from_snapshot(snapshot, side)
 
     for _, name in ipairs(snapshot.arrows or {}) do
         card.arrows[name] = true
+    end
+
+    if snapshot.hidden_attack then
+        card.hidden_attack = tonumber(snapshot.hidden_attack)
+        card.hidden_physical_defense = tonumber(snapshot.hidden_physical_defense)
+        card.hidden_magical_defense = tonumber(snapshot.hidden_magical_defense)
+    else
+        init_hidden_stats(card)
     end
 
     return card

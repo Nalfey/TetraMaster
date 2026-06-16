@@ -170,8 +170,6 @@ end
 protocol.TM_PREFIX = "TM|"
 protocol.TM_LEGACY_PREFIX = "TM/"
 protocol.DEFAULT_PORT = 19876
-protocol.DEFAULT_WSS_PORT = 443
-protocol.DEFAULT_WS_PATH = "/"
 protocol.IPC_PREFIX = "tetramaster|"
 
 function protocol.format_handshake(kind, ...)
@@ -302,23 +300,6 @@ end
 
 function protocol.sessions_equal(session_a, session_b)
   return session_a and session_b and session_a:lower() == session_b:lower()
-end
-
-function protocol.should_use_wss(host)
-  if not host or host == "" then
-    return false
-  end
-
-  local lower = host:lower()
-  if lower == "127.0.0.1" or lower == "localhost" then
-    return false
-  end
-
-  if lower:match("^[%d%.]+$") then
-    return false
-  end
-
-  return true
 end
 
 return protocol

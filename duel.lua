@@ -13,6 +13,8 @@ DUEL = {
   current_turn_role = nil,
   pending_select = false,
   match_ready = false,
+  last_match_state = nil,
+  last_ready_ping = 0,
 }
 
 local function role_to_local_side(role)
@@ -75,6 +77,9 @@ local function snapshot_card(card, side_role)
     attack_string = card.attack_string,
     physical_defense_string = card.physical_defense_string,
     magical_defense_string = card.magical_defense_string,
+    hidden_attack = card.hidden_attack,
+    hidden_physical_defense = card.hidden_physical_defense,
+    hidden_magical_defense = card.hidden_magical_defense,
     side_role = side_role or local_side_to_role(card.side),
     arrows = arrows,
   }
@@ -189,7 +194,7 @@ end
 local function duel_force_quit()
   DUEL.active = false
   bridge.clear_heartbeat()
-  love.event.quit()
+  force_app_quit()
 end
 
 function duel_send_resign()
@@ -263,6 +268,7 @@ end
 
 local function host_begin_match(rematch)
   local state = generate_match_state()
+  DUEL.last_match_state = state
   send({
     type = rematch and "rematch_start" or "match_start",
     state = state,
@@ -439,7 +445,10 @@ end
 
 local function guest_apply_place_card(msg)
   local local_side = role_to_local_side(msg.role)
-  local hand = hands[local_side]
+  local hand = hands and hands[local_side]
+  if not hand then
+    return
+  end
 
   remove_card_from_hand(hand, msg)
 
@@ -456,7 +465,10 @@ end
 
 local function guest_handle_message(msg)
   if msg.type == "hello" then
-    DUEL.connected = true
+    if not DUEL.connected then
+      DUEL.connected = true
+      send({ type = "duel_ready" })
+    end
     return
   end
 
@@ -484,7 +496,7 @@ local function guest_handle_message(msg)
 
   if msg.type == "select_battle" then
     DUEL.pending_select = true
-    set_remote_battle_options(msg.count)
+    queue_or_apply_remote_select_battle(msg.count)
     return
   end
 
@@ -505,6 +517,7 @@ local function guest_handle_message(msg)
   end
 
   if msg.type == "resign" or msg.type == "disconnect" then
+    DUEL.waiting = false
     duel_force_quit()
   end
 end
@@ -512,7 +525,18 @@ end
 local function host_handle_message(msg)
   if msg.type == "peer_connected" then
     DUEL.connected = true
-    duel_start_if_ready(Game)
+    return
+  end
+
+  if msg.type == "duel_ready" then
+    if not DUEL.match_ready then
+      duel_start_if_ready(Game)
+    elseif DUEL.last_match_state then
+      send({
+        type = "match_start",
+        state = DUEL.last_match_state,
+      })
+    end
     return
   end
 
@@ -527,6 +551,7 @@ local function host_handle_message(msg)
   end
 
   if msg.type == "resign" or msg.type == "disconnect" then
+    DUEL.waiting = false
     duel_force_quit()
   end
 end
@@ -537,6 +562,14 @@ function duel_poll()
   end
 
   bridge.write_heartbeat()
+
+  if not DUEL.is_host and DUEL.connected and not DUEL.match_ready then
+    local now = os.clock()
+    if now - (DUEL.last_ready_ping or 0) > 2 then
+      send({ type = "duel_ready" })
+      DUEL.last_ready_ping = now
+    end
+  end
 
   local messages = bridge.poll()
   for _, msg in ipairs(messages) do

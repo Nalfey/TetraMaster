@@ -2,55 +2,36 @@
 
 A port of the FFIX Tetra Master card minigame, packaged as a Windower addon for FFXI players.
 
-This folder is both the game project and the Windower addon (`<Windower>\addons\TetraMaster\`).
+## Download (players)
 
-## Installation (players)
+**Use [GitHub Releases](https://github.com/Nalfey/TetraMaster/releases)** — download `TetraMaster.zip` (or `TetraMaster-<version>.zip`).
 
-Download the latest release zip (`TetraMaster.zip` or `TetraMaster-<version>.zip`) and extract it into your Windower addons folder:
+Do **not** use the green **Code → Download ZIP** button on the main repo page. That is source code for development, not the ready-to-play addon.
+
+### Install
+
+1. Download the latest **release** zip from the link above.
+2. Extract it into your Windower addons folder:
 
 ```
 <Windower>\addons\TetraMaster\
 ```
 
-The zip includes the pre-built game in `runtime\` (no build step required). After extracting:
+You should end up with folders like `runtime\`, plus `TetraMaster.lua` and other `.lua` files — not a `build\` folder.
+
+3. In FFXI:
 
 ```
 //lua load TetraMaster
 ```
 
-Reload after updates:
+After an update:
 
 ```
 //lua reload TetraMaster
 ```
 
-## Building from source (developers)
-
-Requirements:
-
-- [LOVE 11.5](https://love2d.org/) installed (default path: `C:\Program Files\LOVE\love.exe`)
-- Windows PowerShell
-
-Build the fused executable and copy it into `runtime\`:
-
-```powershell
-.\build\build-fused.ps1 -Release
-```
-
-Create a release zip (includes `runtime\`, excludes `sync\`, `dist\`, and build tooling). By default the zip is written to your Desktop:
-
-```powershell
-.\build\package-release.ps1
-```
-
-Optional version label for the zip filename:
-
-```powershell
-.\build\package-release.ps1 -Version 1.0
-```
-
-
-## Windower addon (FFXI)
+## How to play
 
 Load the addon in-game:
 
@@ -83,13 +64,15 @@ Shorthand `//tm` works for all commands above (`//tetramaster play` also works).
 
 ### Multiplayer (party duels)
 
-Both players must be in the same party. The challenger hosts the game; the guest connects over TCP after accepting.
+Both players must be in the same party. Duels use a shared online relay — no port forwarding or VPN required.
+
+Both clients connect automatically after challenge/accept.
 
 ![Multiplayer duel between two party members](assets/screenshots/TetraMaster_MultiPlayer.JPG)
 
 | Command | Description |
 | --- | --- |
-| `//tm duel <name>` | Challenge a party member by name |
+| `//tm duel <name>` | Challenge a party member |
 | `//tm accept` | Accept a pending challenge (challenged player only) |
 | `//tm decline` | Decline a pending challenge |
 | `//tm resign` | Leave an active duel session |
@@ -98,12 +81,11 @@ Both players must be in the same party. The challenger hosts the game; the guest
 **Typical flow**
 
 1. Challenger: `//tm duel <player_name>`
-2. Party chat announces the challenge; opponent sees `//tm accept` or `//tm decline` in addon chat
-3. On accept, both clients launch a duel window automatically
-4. After each game, a new match starts automatically after a short pause — keep playing until someone closes the window or uses `//tm resign`
-5. Closing the game window or resigning ends the session for both players
+2. Party chat announces the challenge; opponent runs `//tm accept` or `//tm decline`
+3. Both clients connect to the relay, then launch the duel window
+4. After each game, a new match starts automatically — close the window or `//tm resign` to end
 
-Shorthand `//tm` works for all commands above (`//tetramaster duel ...` also works).
+Shorthand `//tm` works for all commands (`//tetramaster duel ...` also works).
 
 ## Controls
 
@@ -111,3 +93,6 @@ Shorthand `//tm` works for all commands above (`//tetramaster duel ...` also wor
 - **Enter** — select card / place card
 - **Escape** — deselect card, or quit
 
+---
+
+Maintainers: release packaging and server deploy notes are in [`build/README.md`](build/README.md) (not needed to play).

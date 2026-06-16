@@ -1,0 +1,10 @@
+# Installed to /opt/tetramaster/config/config.yml after tunnel create.
+# Replace TUNNEL_ID with output of: cloudflared tunnel list
+
+tunnel: TUNNEL_ID
+credentials-file: /opt/tetramaster/config/tunnel-credentials.json
+
+ingress:
+  - hostname: relay.tetramasters.uk
+    service: http://127.0.0.1:8080
+  - service: http_status:404

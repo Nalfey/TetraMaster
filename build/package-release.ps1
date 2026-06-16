@@ -15,7 +15,9 @@ $ExcludeDirNames = @(
     ".git",
     ".cursor",
     "dist",
-    "build"
+    "build",
+    "relay",
+    "tools"
 )
 
 $ExcludeFileNames = @(

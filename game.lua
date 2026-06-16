@@ -79,6 +79,8 @@ local function draw_duel_status()
     text = "Waiting for opponent to connect..."
   elseif not is_duel_host() and not DUEL.connected then
     text = "Connecting to " .. duel_peer_name() .. "..."
+  elseif not is_duel_host() and DUEL.connected and not DUEL.match_ready then
+    text = "Starting duel..."
   end
 
   love.graphics.printf(text, 20, 110, 280, "center")
@@ -177,6 +179,7 @@ function Game:draw()
 
     self:draw_ui()
     draw_duel_status()
+    draw_quit_prompt()
 
     TLfres.letterbox(4,3)
 end
@@ -187,6 +190,7 @@ function Game:draw_ui()
     end
 
     draw_battle_animation()
+    draw_capture_fx()
     draw_game_cursor()
 end
 
@@ -211,7 +215,7 @@ function Game:update(dt)
     update_cursor_animation(dt)
     update_placement(dt)
 
-    if is_coin_toss_active() or is_placement_resolving() then
+    if is_coin_toss_active() or is_placement_resolving() or is_capture_fx_active() then
       return
     end
 

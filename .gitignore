@@ -3,3 +3,6 @@ runtime/
 sync/
 TetraMaster.exe
 *.love
+tools/cloudflared.exe
+*.key
+Oracle/

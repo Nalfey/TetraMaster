@@ -2,6 +2,7 @@
 
 local socket = require("socket")
 local protocol = dofile(windower.addon_path .. "protocol.lua")
+local ws_client = dofile(windower.addon_path .. "ws_client.lua")
 
 local bridge = {
   active = false,
@@ -24,6 +25,12 @@ local bridge = {
   connect_host = nil,
   connect_port = nil,
   connected_announced = false,
+  relay_mode = false,
+  transport = "tcp",
+  ws_conn = nil,
+  relay_session_ready = false,
+  pending_game_args = nil,
+  join_sent = false,
   game_launched = false,
   launch_time = nil,
   nudge_counter = 0,
@@ -118,26 +125,190 @@ local function reset_sync_files()
 end
 
 local function send_tcp(msg)
+  if bridge.transport == "wss" then
+    if not bridge.ws_conn or not bridge.ws_conn.handshake_done then
+      return false
+    end
+
+    local line = protocol.encode(msg)
+    local ok, err = ws_client.send(bridge.ws_conn, line)
+    if not ok then
+      return false, err
+    end
+    return true
+  end
+
   if not bridge.client then
     return false
   end
 
   local line = protocol.encode(msg) .. "\n"
-  local ok, err = bridge.client:send(line)
-  return ok, err
+  local sent = 0
+
+  while sent < #line do
+    local ok, err = bridge.client:send(line, sent + 1)
+    if not ok then
+      return false, err
+    end
+    sent = sent + ok
+  end
+
+  return true
 end
 
 local function queue_to_game(msg)
   append_line(bridge.inbox_path, protocol.encode(msg))
 end
 
-local function send_ipc_resign()
-  if bridge.session_id and bridge.local_name then
-    windower.send_ipc_message(protocol.format_ipc("RESIGN", bridge.session_id, bridge.local_name))
+local function try_launch_pending_game()
+  if bridge.game_launched or not bridge.pending_game_args or not bridge.relay_session_ready then
+    return
+  end
+
+  if bridge.launch_game(bridge.pending_game_args) then
+    chat("launching duel (" .. bridge.role .. ")...")
+    bridge.pending_game_args = nil
   end
 end
 
+local function send_relay_join()
+  if not bridge.relay_mode or bridge.join_sent then
+    return true
+  end
+
+  local ok = send_tcp({
+    type = "join",
+    role = bridge.role,
+    session = bridge.session_id:lower(),
+    player = bridge.local_name,
+  })
+
+  if ok then
+    bridge.join_sent = true
+    return true
+  end
+
+  return false
+end
+
+local function handle_tcp_message(msg)
+  if not msg or not msg.type then
+    return
+  end
+
+  if msg.type == "ping" then
+    return
+  end
+
+  if msg.type == "join_ok" then
+    if bridge.role == "host" and bridge.relay_mode then
+      bridge.relay_session_ready = true
+      try_launch_pending_game()
+    end
+    return
+  end
+
+  if msg.type == "join_reject" then
+    chat("relay rejected join (" .. tostring(msg.reason or "unknown") .. ").")
+    bridge.shutdown("connection_closed")
+    return
+  end
+
+  if msg.type == "relay_paired" then
+    if bridge.role == "host" then
+      chat("opponent connected.")
+      queue_to_game({ type = "peer_connected" })
+    end
+    bridge.relay_session_ready = true
+    try_launch_pending_game()
+    return
+  end
+
+  if msg.type == "hello" and bridge.role == "guest" and bridge.relay_mode then
+    chat("connected to host.")
+    bridge.relay_session_ready = true
+    queue_to_game(msg)
+    try_launch_pending_game()
+    return
+  end
+
+  if msg.type == "resign" or msg.type == "disconnect" then
+    bridge.shutdown("opponent_left")
+    return
+  end
+
+  queue_to_game(msg)
+end
+
+local function drain_tcp_inbox()
+  if bridge.transport == "wss" then
+    if not bridge.ws_conn or not bridge.ws_conn.handshake_done then
+      return
+    end
+
+    local lines, err = ws_client.receive_lines(bridge.ws_conn)
+    for _, line in ipairs(lines) do
+      local msg = protocol.decode(line)
+      if msg then
+        handle_tcp_message(msg)
+      end
+    end
+
+    if err == "closed" then
+      bridge.shutdown("connection_closed")
+    end
+    return
+  end
+
+  if not bridge.client then
+    return
+  end
+
+  while true do
+    local chunk, err, partial = bridge.client:receive("*l")
+    if chunk then
+      local msg = protocol.decode(chunk)
+      if msg then
+        handle_tcp_message(msg)
+      end
+    elseif partial and partial ~= "" then
+      bridge.recv_buffer = bridge.recv_buffer .. partial
+      local newline = bridge.recv_buffer:find("\n", 1, true)
+      while newline do
+        local line = bridge.recv_buffer:sub(1, newline - 1):gsub("\r$", "")
+        bridge.recv_buffer = bridge.recv_buffer:sub(newline + 1)
+        if line ~= "" then
+          local msg = protocol.decode(line)
+          if msg then
+            handle_tcp_message(msg)
+          end
+        end
+        newline = bridge.recv_buffer:find("\n", 1, true)
+      end
+      break
+    elseif err == "closed" then
+      bridge.shutdown("connection_closed")
+      return
+    else
+      break
+    end
+  end
+end
+
+local function send_resign_handshake()
+  if not bridge.session_id or not bridge.local_name then
+    return
+  end
+
+  windower.send_ipc_message(protocol.format_ipc("RESIGN", bridge.session_id, bridge.local_name))
+end
+
 local function close_tcp()
+  if bridge.ws_conn then
+    ws_client.close(bridge.ws_conn)
+    bridge.ws_conn = nil
+  end
+
   if bridge.client then
     bridge.client:close()
     bridge.client = nil
@@ -172,6 +343,12 @@ function bridge.complete_shutdown(reason, silent)
   bridge.local_name = nil
   bridge.peer_name = nil
   bridge.connected_announced = false
+  bridge.relay_mode = false
+  bridge.transport = "tcp"
+  bridge.ws_conn = nil
+  bridge.relay_session_ready = false
+  bridge.pending_game_args = nil
+  bridge.join_sent = false
 
   if bridge.on_session_end and not silent then
     bridge.on_session_end(reason)
@@ -190,7 +367,7 @@ local function end_duel(reason)
     send_tcp({ type = "disconnect", reason = reason })
   end
 
-  send_ipc_resign()
+  send_resign_handshake()
   queue_to_game({ type = "disconnect", reason = reason })
   close_tcp()
   begin_wind_down(reason)
@@ -309,6 +486,8 @@ function bridge.start_host(session_id, peer_name, port, local_name)
 
   bridge.active = true
   bridge.role = "host"
+  bridge.relay_mode = false
+  bridge.join_sent = false
   bridge.session_id = session_id
   bridge.peer_name = peer_name
   bridge.local_name = local_name
@@ -325,6 +504,8 @@ function bridge.start_guest(session_id, peer_name, host_ip, port, local_name)
 
   bridge.active = true
   bridge.role = "guest"
+  bridge.relay_mode = false
+  bridge.join_sent = false
   bridge.session_id = session_id
   bridge.peer_name = peer_name
   bridge.local_name = local_name
@@ -336,6 +517,7 @@ function bridge.start_guest(session_id, peer_name, host_ip, port, local_name)
   local ok, err = client:connect(host_ip, port or protocol.DEFAULT_PORT)
   if not ok and err ~= "timeout" then
     chat("failed to connect to host (" .. tostring(err) .. ").")
+    chat("host must allow inbound TCP " .. tostring(port or protocol.DEFAULT_PORT) .. " (firewall/router).")
     bridge.active = false
     client:close()
     return false
@@ -345,6 +527,60 @@ function bridge.start_guest(session_id, peer_name, host_ip, port, local_name)
   bridge.connect_host = host_ip
   bridge.connect_port = port or protocol.DEFAULT_PORT
   chat("connecting to host " .. host_ip .. ":" .. tostring(bridge.connect_port) .. "...")
+  return true
+end
+
+local function start_relay_tcp(local_name, relay_host, port)
+  bridge.connect_port = port or protocol.DEFAULT_PORT
+  local client = socket.tcp()
+  client:settimeout(0)
+  local ok, err = client:connect(relay_host, bridge.connect_port)
+  if not ok and err ~= "timeout" then
+    chat("failed to connect to relay (" .. tostring(err) .. ").")
+    bridge.active = false
+    client:close()
+    return false
+  end
+
+  bridge.client = client
+  bridge.connect_host = relay_host
+  chat("connecting to relay " .. relay_host .. ":" .. tostring(bridge.connect_port) .. "...")
+  return true
+end
+
+function bridge.start_relay(session_id, peer_name, role, relay_host, port, local_name, game_args)
+  bridge.shutdown("restart")
+
+  bridge.active = true
+  bridge.role = role
+  bridge.relay_mode = true
+  bridge.join_sent = false
+  bridge.relay_session_ready = false
+  bridge.pending_game_args = game_args
+  bridge.session_id = session_id
+  bridge.peer_name = peer_name
+  bridge.local_name = local_name
+  set_sync_paths(session_id, local_name)
+  reset_sync_files()
+
+  local use_wss = protocol.should_use_wss(relay_host)
+  if not use_wss then
+    return start_relay_tcp(local_name, relay_host, port)
+  end
+
+  bridge.transport = "wss"
+  bridge.connect_host = relay_host
+  bridge.connect_port = port or protocol.DEFAULT_WSS_PORT
+
+  local conn, err = ws_client.connect(relay_host, bridge.connect_port, protocol.DEFAULT_WS_PATH)
+  if not conn then
+    chat("failed to connect to relay (" .. tostring(err) .. ").")
+    bridge.active = false
+    return false
+  end
+
+  bridge.ws_conn = conn
+  chat("connecting to relay wss://" .. relay_host .. protocol.DEFAULT_WS_PATH .. " ...")
   return true
 end
 
@@ -390,6 +626,36 @@ function bridge.get_local_ip()
   return ip or "127.0.0.1"
 end
 
+function bridge.get_public_ip()
+  local ok, http = pcall(require, "socket.http")
+  if not ok then
+    return nil
+  end
+
+  http.TIMEOUT = 8
+  local body, status = http.request("http://api.ipify.org")
+  if status ~= 200 or not body then
+    return nil
+  end
+
+  return body:match("^(%d+%.%d+%.%d+%.%d+)$")
+end
+
+function bridge.get_connect_ip(override_ip)
+  if override_ip and override_ip ~= "" then
+    return override_ip
+  end
+
+  chat("looking up your public IP for duel...")
+  local public_ip = bridge.get_public_ip()
+  if public_ip then
+    return public_ip
+  end
+
+  chat("could not fetch public IP. Use //tm hostip <ip> (Tailscale recommended).")
+  return bridge.get_local_ip()
+end
+
 function bridge.get_session_id()
   return bridge.session_id
 end
@@ -408,7 +674,7 @@ function bridge.tick()
 
   check_game_heartbeat()
 
-  if bridge.client then
+  if bridge.client or bridge.ws_conn then
     local now = os.time()
     if now - bridge.last_tcp_ping >= TCP_KEEPALIVE_INTERVAL then
       send_tcp({ type = "ping" })
@@ -431,34 +697,38 @@ function bridge.tick()
     end
   end
 
-  if bridge.role == "guest" and bridge.client then
-    local _, err = bridge.client:connect(bridge.connect_host, bridge.connect_port)
-    if not bridge.connected_announced and (err == "already connected" or err == "connected") then
-      bridge.connected_announced = true
-      chat("connected to host.")
+  if bridge.ws_conn then
+    if not bridge.ws_conn.handshake_done then
+      local ready, err = ws_client.tick_handshake(bridge.ws_conn)
+      if err then
+        chat("relay websocket handshake failed (" .. tostring(err) .. ").")
+        bridge.shutdown("connection_closed")
+        return
+      end
+    else
+      ws_client.flush_send(bridge.ws_conn)
+    end
+
+    if bridge.ws_conn.handshake_done and bridge.relay_mode and not bridge.join_sent then
+      send_relay_join()
     end
   end
 
   if bridge.client then
-    local chunk, err, partial = bridge.client:receive("*l")
-    if chunk then
-      local msg = protocol.decode(chunk)
-      if msg then
-        if msg.type == "ping" then
-          return
-        end
-
-        if msg.type == "resign" or msg.type == "disconnect" then
-          bridge.shutdown("opponent_left")
-          return
-        end
-
-        queue_to_game(msg)
+    local _, err = bridge.client:connect(bridge.connect_host, bridge.connect_port)
+    if not bridge.connected_announced and (err == "already connected" or err == "connected") then
+      bridge.connected_announced = true
+      if bridge.relay_mode then
+        send_relay_join()
+      elseif bridge.role == "guest" then
+        chat("connected to host.")
       end
-    elseif partial and partial ~= "" then
-      bridge.recv_buffer = bridge.recv_buffer .. partial
-    elseif err == "closed" then
-      bridge.shutdown("connection_closed")
+    end
+  end
+
+  if bridge.client or (bridge.ws_conn and bridge.ws_conn.handshake_done) then
+    drain_tcp_inbox()
+    if not bridge.active then
       return
     end
   end
@@ -474,7 +744,7 @@ function bridge.tick()
         return
       end
 
-      if bridge.client then
+      if bridge.client or (bridge.ws_conn and bridge.ws_conn.handshake_done) then
         send_tcp(msg)
       end
     end
