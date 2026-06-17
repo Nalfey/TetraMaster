@@ -8,6 +8,7 @@ local bridge = {
   active = false,
   winding_down = false,
   winding_reason = nil,
+  wind_down_started = nil,
   role = nil,
   session_id = nil,
   local_name = nil,
@@ -32,6 +33,8 @@ local bridge = {
   pending_game_args = nil,
   join_sent = false,
   game_launched = false,
+  solo_session = false,
+  launch_attempts = 0,
   launch_time = nil,
   nudge_counter = 0,
   last_tcp_ping = 0,
@@ -43,30 +46,90 @@ local LAUNCH_GRACE = 15
 local QUIT_NUDGE_INTERVAL = 30
 local TCP_KEEPALIVE_INTERVAL = 15
 local MAX_GAME_INSTANCES = 2
+local debug_mode = false
 
 local function chat(msg)
   windower.add_to_chat(207, "TetraMaster: " .. msg)
 end
 
+local function debug_chat(msg)
+  if debug_mode then
+    chat(msg)
+  end
+end
+
+function bridge.set_debug(enabled)
+  debug_mode = enabled and true or false
+end
+
+local HEARTBEAT_CHECK_INTERVAL = 2
+local PROCESS_COUNT_CACHE_SEC = 20
+local last_heartbeat_check = 0
+local process_count_cache = { value = 0, at = 0 }
+
 local function ensure_dir(path)
-  os.execute('mkdir "' .. path:gsub("/", "\\") .. '" 2>nul')
+  windower.create_dir(path:gsub("\\", "/"))
+end
+
+local function refresh_process_count()
+  if bridge.solo_session then
+    return process_count_cache.value
+  end
+
+  local now = os.time()
+  if now - process_count_cache.at < PROCESS_COUNT_CACHE_SEC then
+    return process_count_cache.value
+  end
+
+  local handle = io.popen('tasklist /FI "IMAGENAME eq TetraMaster.exe" /NH 2>nul')
+  local count = 0
+  if handle then
+    for line in handle:lines() do
+      if line:lower():find("tetramaster.exe", 1, true) then
+        count = count + 1
+      end
+    end
+    handle:close()
+  end
+
+  process_count_cache.value = count
+  process_count_cache.at = now
+  return count
 end
 
 local function count_running_games()
-  local handle = io.popen('tasklist /FI "IMAGENAME eq TetraMaster.exe" /NH 2>nul')
-  if not handle then
-    return 0
+  return refresh_process_count()
+end
+
+local function invalidate_process_count()
+  process_count_cache.at = 0
+end
+
+local function cleanup_lingering_games(reason, was_solo, had_game, silent)
+  if not had_game then
+    return
   end
 
-  local count = 0
-  for line in handle:lines() do
-    if line:lower():find("tetramaster.exe", 1, true) then
-      count = count + 1
+  invalidate_process_count()
+  local running = count_running_games()
+  if running == 0 then
+    return
+  end
+
+  local should_kill = false
+  if was_solo or reason == "force_reset" then
+    should_kill = true
+  elseif running > MAX_GAME_INSTANCES then
+    should_kill = true
+    if not silent then
+      chat("closed leftover TetraMaster processes (" .. running .. " running).")
     end
   end
 
-  handle:close()
-  return count
+  if should_kill then
+    os.execute("taskkill /IM TetraMaster.exe /F 2>nul")
+    invalidate_process_count()
+  end
 end
 
 local function read_new_lines(path, offset)
@@ -165,8 +228,13 @@ local function try_launch_pending_game()
     return
   end
 
+  if bridge.launch_attempts >= 1 then
+    return
+  end
+
+  bridge.launch_attempts = bridge.launch_attempts + 1
   if bridge.launch_game(bridge.pending_game_args) then
-    chat("launching duel (" .. bridge.role .. ")...")
+    debug_chat("launching duel (" .. bridge.role .. ")...")
     bridge.pending_game_args = nil
   end
 end
@@ -209,14 +277,18 @@ local function handle_tcp_message(msg)
   end
 
   if msg.type == "join_reject" then
-    chat("relay rejected join (" .. tostring(msg.reason or "unknown") .. ").")
+    if msg.reason == "ip_limit" then
+      chat("relay limit: max 2 TetraMaster connections per internet connection.")
+    else
+      chat("relay rejected join (" .. tostring(msg.reason or "unknown") .. ").")
+    end
     bridge.shutdown("connection_closed")
     return
   end
 
   if msg.type == "relay_paired" then
     if bridge.role == "host" then
-      chat("opponent connected.")
+      debug_chat("opponent connected.")
       queue_to_game({ type = "peer_connected" })
     end
     bridge.relay_session_ready = true
@@ -225,7 +297,7 @@ local function handle_tcp_message(msg)
   end
 
   if msg.type == "hello" and bridge.role == "guest" and bridge.relay_mode then
-    chat("connected to host.")
+    debug_chat("connected to host.")
     bridge.relay_session_ready = true
     queue_to_game(msg)
     try_launch_pending_game()
@@ -325,19 +397,31 @@ function bridge.set_session_end_handler(handler)
 end
 
 function bridge.is_active()
-  return bridge.active or bridge.winding_down
+  return bridge.active
+end
+
+function bridge.is_busy()
+  return bridge.active or bridge.winding_down or bridge.game_launched or bridge.solo_session
 end
 
 function bridge.complete_shutdown(reason, silent)
+  local was_solo = bridge.solo_session
+  local had_game = bridge.game_launched
+
   close_tcp()
 
   bridge.active = false
   bridge.winding_down = false
   bridge.winding_reason = nil
+  bridge.wind_down_started = nil
   bridge.game_launched = false
+  bridge.solo_session = false
+  bridge.launch_attempts = 0
   bridge.launch_time = nil
   bridge.nudge_counter = 0
   bridge.last_tcp_ping = 0
+  last_heartbeat_check = 0
+  invalidate_process_count()
   bridge.role = nil
   bridge.session_id = nil
   bridge.local_name = nil
@@ -349,6 +433,15 @@ function bridge.complete_shutdown(reason, silent)
   bridge.relay_session_ready = false
   bridge.pending_game_args = nil
   bridge.join_sent = false
+  bridge.inbox_path = nil
+  bridge.outbox_path = nil
+  bridge.heartbeat_path = nil
+  bridge.closed_flag_path = nil
+  bridge.sync_dir = nil
+  bridge.inbox_offset = 0
+  bridge.outbox_offset = 0
+
+  cleanup_lingering_games(reason, was_solo, had_game, silent)
 
   if bridge.on_session_end and not silent then
     bridge.on_session_end(reason)
@@ -360,6 +453,7 @@ local function begin_wind_down(reason)
   bridge.winding_down = true
   bridge.winding_reason = reason
   bridge.nudge_counter = 0
+  bridge.wind_down_started = os.time()
 end
 
 local function end_duel(reason)
@@ -379,23 +473,51 @@ local function end_duel_for_opponent(reason)
   begin_wind_down(reason)
 end
 
+function bridge.force_reset(kill_game)
+  close_tcp()
+  if kill_game then
+    os.execute('taskkill /IM TetraMaster.exe /F 2>nul')
+    invalidate_process_count()
+  end
+  bridge.complete_shutdown("force_reset", true)
+end
+
 function bridge.shutdown(reason)
   reason = reason or "stop"
 
-  if reason == "restart" or reason == "stop" or reason == "launch_failed" then
+  if reason == "restart" or reason == "stop" or reason == "launch_failed" or reason == "force_reset" then
     bridge.complete_shutdown(reason, true)
     return
   end
 
-  if reason == "opponent_left" or reason == "connection_closed" then
+  if reason == "manual_resign" then
+    bridge.complete_shutdown(reason, false)
+    return
+  end
+
+  if reason == "connection_closed" then
+    if not bridge.game_launched then
+      bridge.complete_shutdown(reason, false)
+      return
+    end
+    chat("relay connection lost.")
+    end_duel_for_opponent(reason)
+    return
+  end
+
+  if reason == "opponent_left" then
     chat("opponent left the duel.")
     end_duel_for_opponent(reason)
     return
   end
 
-  if reason == "local_quit" or reason == "manual_resign" or reason == "game_closed" then
+  if reason == "local_quit" or reason == "game_closed" then
     if reason == "game_closed" or reason == "local_quit" then
       chat("TetraMaster window closed. Ending duel session.")
+    end
+    if bridge.solo_session and not bridge.active then
+      bridge.complete_shutdown(reason, false)
+      return
     end
     end_duel(reason)
     return
@@ -419,6 +541,10 @@ local function within_launch_grace()
 end
 
 local function read_heartbeat_age()
+  if not bridge.heartbeat_path then
+    return nil
+  end
+
   local file = io.open(bridge.heartbeat_path, "r")
   if not file then
     return nil
@@ -434,13 +560,31 @@ local function read_heartbeat_age()
   return os.time() - value
 end
 
+local WIND_DOWN_TIMEOUT = 45
+
+local function game_exe_running()
+  return refresh_process_count() > 0
+end
+
 local function game_process_alive()
+  if not bridge.game_launched then
+    return false
+  end
+
+  if bridge.solo_session then
+    return true
+  end
+
   if within_launch_grace() then
     return true
   end
 
   local age = read_heartbeat_age()
-  return age ~= nil and age <= HEARTBEAT_TIMEOUT
+  if age ~= nil and age <= HEARTBEAT_TIMEOUT then
+    return true
+  end
+
+  return game_exe_running()
 end
 
 local function check_closed_flag()
@@ -454,12 +598,22 @@ local function check_closed_flag()
 
   os.remove(bridge.closed_flag_path)
 
-  if bridge.active or bridge.game_launched or bridge.winding_down then
+  if bridge.active or bridge.game_launched or bridge.winding_down or bridge.solo_session then
     bridge.shutdown("game_closed")
   end
 end
 
 local function tick_wind_down()
+  if not bridge.game_launched or not game_exe_running() then
+    bridge.complete_shutdown(bridge.winding_reason or "session_ended")
+    return
+  end
+
+  if bridge.wind_down_started and (os.time() - bridge.wind_down_started) >= WIND_DOWN_TIMEOUT then
+    bridge.complete_shutdown(bridge.winding_reason or "session_ended")
+    return
+  end
+
   bridge.nudge_counter = bridge.nudge_counter + 1
 
   if bridge.nudge_counter % QUIT_NUDGE_INTERVAL == 0 then
@@ -472,9 +626,19 @@ local function tick_wind_down()
 end
 
 local function check_game_heartbeat()
-  if not bridge.active or not bridge.game_launched then
+  if not bridge.game_launched or bridge.solo_session then
     return
   end
+
+  if not bridge.active then
+    return
+  end
+
+  local now = os.time()
+  if now - last_heartbeat_check < HEARTBEAT_CHECK_INTERVAL then
+    return
+  end
+  last_heartbeat_check = now
 
   if not game_process_alive() then
     bridge.shutdown("game_closed")
@@ -496,7 +660,7 @@ function bridge.start_host(session_id, peer_name, port, local_name)
 
   bridge.server = assert(socket.bind("*", port or protocol.DEFAULT_PORT))
   bridge.server:settimeout(0)
-  chat("waiting for duel connection on port " .. tostring(port or protocol.DEFAULT_PORT) .. "...")
+  debug_chat("waiting for duel connection on port " .. tostring(port or protocol.DEFAULT_PORT) .. "...")
 end
 
 function bridge.start_guest(session_id, peer_name, host_ip, port, local_name)
@@ -526,7 +690,7 @@ function bridge.start_guest(session_id, peer_name, host_ip, port, local_name)
   bridge.client = client
   bridge.connect_host = host_ip
   bridge.connect_port = port or protocol.DEFAULT_PORT
-  chat("connecting to host " .. host_ip .. ":" .. tostring(bridge.connect_port) .. "...")
+  debug_chat("connecting to host " .. host_ip .. ":" .. tostring(bridge.connect_port) .. "...")
   return true
 end
 
@@ -544,7 +708,7 @@ local function start_relay_tcp(local_name, relay_host, port)
 
   bridge.client = client
   bridge.connect_host = relay_host
-  chat("connecting to relay " .. relay_host .. ":" .. tostring(bridge.connect_port) .. "...")
+  debug_chat("connecting to relay " .. relay_host .. ":" .. tostring(bridge.connect_port) .. "...")
   return true
 end
 
@@ -552,11 +716,13 @@ function bridge.start_relay(session_id, peer_name, role, relay_host, port, local
   bridge.shutdown("restart")
 
   bridge.active = true
+  bridge.solo_session = false
   bridge.role = role
   bridge.relay_mode = true
   bridge.join_sent = false
   bridge.relay_session_ready = false
   bridge.pending_game_args = game_args
+  bridge.launch_attempts = 0
   bridge.session_id = session_id
   bridge.peer_name = peer_name
   bridge.local_name = local_name
@@ -580,7 +746,7 @@ function bridge.start_relay(session_id, peer_name, role, relay_host, port, local
   end
 
   bridge.ws_conn = conn
-  chat("connecting to relay wss://" .. relay_host .. protocol.DEFAULT_WS_PATH .. " ...")
+  debug_chat("connecting to relay wss://" .. relay_host .. protocol.DEFAULT_WS_PATH .. " ...")
   return true
 end
 
@@ -592,23 +758,32 @@ function bridge.launch_game(args)
     return false
   end
 
-  local running = count_running_games()
-  if running >= MAX_GAME_INSTANCES then
-    chat("already running " .. MAX_GAME_INSTANCES .. " TetraMaster windows (test limit).")
+  if bridge.game_launched then
     return false
   end
 
-  local cmd = 'start "" "' .. path .. '"'
+  if not bridge.active then
+    -- Solo play: skip tasklist (avoids flashing console windows during monitoring).
+  else
+    invalidate_process_count()
+    local running = count_running_games()
+    if running >= MAX_GAME_INSTANCES then
+      chat("already running " .. MAX_GAME_INSTANCES .. " TetraMaster windows (test limit).")
+      chat("Use //tm reset to close leftover game windows.")
+      return false
+    end
+  end
+
+  local cmd = 'start "" /MIN "' .. path .. '"'
   for _, v in ipairs(args) do
     cmd = cmd .. ' "' .. tostring(v):gsub('"', '') .. '"'
   end
 
   os.execute(cmd)
 
-  if bridge.active then
-    bridge.game_launched = true
-    bridge.launch_time = os.time()
-  end
+  bridge.game_launched = true
+  bridge.launch_time = os.time()
+  bridge.solo_session = not bridge.active
 
   return true
 end
@@ -646,7 +821,7 @@ function bridge.get_connect_ip(override_ip)
     return override_ip
   end
 
-  chat("looking up your public IP for duel...")
+  debug_chat("looking up your public IP for duel...")
   local public_ip = bridge.get_public_ip()
   if public_ip then
     return public_ip
@@ -665,6 +840,10 @@ function bridge.tick()
 
   if bridge.winding_down then
     tick_wind_down()
+    return
+  end
+
+  if bridge.solo_session and bridge.game_launched and not bridge.active then
     return
   end
 
@@ -687,7 +866,7 @@ function bridge.tick()
     if client then
       client:settimeout(0)
       bridge.client = client
-      chat("opponent connected.")
+      debug_chat("opponent connected.")
       queue_to_game({ type = "peer_connected" })
       send_tcp({
         type = "hello",
@@ -721,7 +900,7 @@ function bridge.tick()
       if bridge.relay_mode then
         send_relay_join()
       elseif bridge.role == "guest" then
-        chat("connected to host.")
+        debug_chat("connected to host.")
       end
     end
   end

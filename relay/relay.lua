@@ -17,6 +17,7 @@ local protocol = require("protocol")
 local BIND_HOST = os.getenv("TM_RELAY_BIND") or "127.0.0.1"
 local BIND_PORT = tonumber(os.getenv("TM_RELAY_PORT") or tostring(protocol.DEFAULT_PORT)) or protocol.DEFAULT_PORT
 local MAX_SESSIONS = tonumber(os.getenv("TM_RELAY_MAX_SESSIONS") or "64") or 64
+local MAX_PER_IP = tonumber(os.getenv("TM_RELAY_MAX_PER_IP") or "2") or 2
 local IDLE_TIMEOUT = tonumber(os.getenv("TM_RELAY_IDLE_SEC") or "600") or 600
 
 local server = assert(socket.bind(BIND_HOST, BIND_PORT))
@@ -51,6 +52,33 @@ local function client_send(sock, msg)
   end
 
   return true
+end
+
+local function client_remote_ip(sock, client)
+  if client and client.remote_ip then
+    return client.remote_ip
+  end
+
+  local ok, ip = pcall(function()
+    return sock:getpeername()
+  end)
+  if ok and type(ip) == "string" and ip ~= "" then
+    return ip
+  end
+  if ok and type(ip) == "table" then
+    return ip[1] or "unknown"
+  end
+  return "unknown"
+end
+
+local function count_clients_for_ip(ip, exclude_sock)
+  local count = 0
+  for sock, client in pairs(clients) do
+    if sock ~= exclude_sock and client.remote_ip == ip then
+      count = count + 1
+    end
+  end
+  return count
 end
 
 local function remove_client(sock)
@@ -136,6 +164,13 @@ local function handle_join(sock, msg)
     return
   end
 
+  client.remote_ip = client.remote_ip or client_remote_ip(sock, client)
+  if count_clients_for_ip(client.remote_ip, sock) >= MAX_PER_IP then
+    log("reject join from " .. client.remote_ip .. " (ip_limit)")
+    reject_join(sock, "ip_limit")
+    return
+  end
+
   local sess = sessions[session_id]
   if not sess then
     if session_count() >= MAX_SESSIONS then
@@ -209,11 +244,18 @@ local function handle_line(sock, line)
     return
   end
 
+  if msg.type == "_relay_meta" then
+    if client then
+      client.remote_ip = msg.client_ip or client.remote_ip
+    end
+    return
+  end
+
   if msg.type == "ping" then
     return
   end
 
-  if msg.type == "join_ok" or msg.type == "join_reject" or msg.type == "relay_paired" then
+  if msg.type == "join_ok" or msg.type == "join_reject" or msg.type == "relay_paired" or msg.type == "_relay_meta" then
     return
   end
 
@@ -226,6 +268,7 @@ local function accept_client(sock)
     sock = sock,
     buffer = "",
     joined = false,
+    remote_ip = nil,
     last_active = socket.gettime(),
   }
   log("client connected " .. tostring(sock:getpeername()))
@@ -276,7 +319,7 @@ local function reap_idle_sessions()
   end
 end
 
-log("listening on " .. BIND_HOST .. ":" .. tostring(BIND_PORT))
+log("listening on " .. BIND_HOST .. ":" .. tostring(BIND_PORT) .. " (max " .. tostring(MAX_PER_IP) .. " clients per IP)")
 
 while true do
   local read_list = { server }

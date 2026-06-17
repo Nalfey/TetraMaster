@@ -1,7 +1,7 @@
 _addon = {
     name = 'TetraMaster',
     author = 'Nalfey',
-    version = '1.1.5',
+    version = '1.1.6',
     description = 'Launch Tetra Master and duel party members.',
 }
 
@@ -18,9 +18,16 @@ local host_connect_ip_override = nil
 local relay_host_override = nil
 local DEFAULT_RELAY_HOST = 'relay.tetramasters.uk'
 local RELAY_DOMAIN = 'tetramasters.uk'
+local debug_mode = false
 
 local function chat(msg)
     windower.add_to_chat(207, 'TetraMaster: ' .. msg)
+end
+
+local function debug_chat(msg)
+    if debug_mode then
+        chat(msg)
+    end
 end
 
 local function exe_path()
@@ -95,8 +102,8 @@ local function bridge_dir(session_id, local_name)
 end
 
 local function launch_solo()
-    if duel_bridge.is_active() then
-        duel_bridge.shutdown('manual_resign')
+    if duel_bridge.is_busy() then
+        duel_bridge.force_reset(true)
     end
 
     local path = exe_path()
@@ -136,7 +143,7 @@ end
 
 local function launch_duel(role, session_id, my_role, peer_name, host_ip, port)
     if duel_bridge.launch_game(build_duel_args(role, session_id, my_role, peer_name, host_ip, port)) then
-        chat('launching duel (' .. role .. ')...')
+        debug_chat('launching duel (' .. role .. ')...')
     else
         duel_bridge.shutdown('launch_failed')
     end
@@ -177,7 +184,7 @@ local function start_relay_duel(session_id, local_name, peer_name, relay_host, p
     local game_role = tcp_role == 'host' and 'challenger' or 'guest'
     local game_args = build_duel_args(tcp_role, session_id, game_role, peer_name, relay_host, port)
     if duel_bridge.start_relay(session_id, peer_name, tcp_role, relay_host, port, local_name, game_args) then
-        chat('waiting for relay (' .. tcp_role .. ')...')
+        debug_chat('waiting for relay (' .. tcp_role .. ')...')
     end
 end
 
@@ -193,7 +200,7 @@ local function start_guest_duel(session_id, guest, challenger, host_ip, port)
 end
 
 local function begin_duel_as_host(challenge)
-    if duel_bridge.is_active() then
+    if duel_bridge.is_busy() then
         return
     end
 
@@ -230,8 +237,9 @@ local function notify_guest_challenge(session_id, challenger, guest)
 end
 
 local function issue_challenge(target_name)
-    if duel_bridge.is_active() then
-        chat('a duel is already active. Resign first with //tm resign')
+    if duel_bridge.is_busy() then
+        chat('a duel session is still active or ending.')
+        chat('Use //tm reset if you cannot start a new duel.')
         return
     end
 
@@ -275,7 +283,7 @@ local function accept_challenge()
     local relay_host = get_relay_host()
     if relay_host then
         start_relay_duel(challenge.session_id, challenge.guest, challenge.challenger, relay_host, relay_port_for(relay_host), 'guest')
-        chat('accepted. Connecting to relay...')
+        debug_chat('accepted. Connecting to relay...')
     else
         pending_connect = challenge
         chat('accepted. Waiting for ' .. challenge.challenger .. ' to host the duel...')
@@ -416,9 +424,11 @@ end
 duel_bridge.set_session_end_handler(function(reason)
     clear_duel_state()
 
-    if reason == 'opponent_left' or reason == 'connection_closed' then
+    if reason == 'opponent_left' then
         chat('duel ended. Your opponent closed the game.')
-    elseif reason == 'manual_resign' then
+    elseif reason == 'connection_closed' then
+        chat('duel ended. Relay connection failed.')
+    elseif reason == 'manual_resign' or reason == 'force_reset' then
         chat('duel session ended.')
     end
 end)
@@ -481,14 +491,27 @@ local function handle_command(command, ...)
     elseif command == 'decline' then
         decline_challenge()
     elseif command == 'resign' then
-        if duel_bridge.is_active() then
+        if duel_bridge.is_busy() then
             local session_id = duel_bridge.get_session_id()
-            send_ipc_handshake('RESIGN', session_id, player_name() or 'unknown')
+            if session_id then
+                send_ipc_handshake('RESIGN', session_id, player_name() or 'unknown')
+            end
             duel_bridge.shutdown('manual_resign')
             chat('you resigned from the duel.')
         else
             chat('no active duel.')
         end
+    elseif command == 'reset' then
+        if duel_bridge.get_session_id() then
+            send_ipc_handshake('RESIGN', duel_bridge.get_session_id(), player_name() or 'unknown')
+        end
+        duel_bridge.force_reset(true)
+        clear_duel_state()
+        chat('TetraMaster reset. Reload with //lua r TetraMaster if play/duel still fails.')
+    elseif command == 'debug' then
+        debug_mode = not debug_mode
+        duel_bridge.set_debug(debug_mode)
+        chat('debug mode ' .. (debug_mode and 'on' or 'off') .. '.')
     elseif command == 'help' then
         chat('//tm play - solo game')
         chat('//tm duel <name> - challenge a party member')
@@ -499,6 +522,8 @@ local function handle_command(command, ...)
         chat('//tm hostip clear - use auto IP again')
         chat('//tm accept / //tm decline - respond to a challenge')
         chat('//tm resign - leave an active duel')
+        chat('//tm reset - force-clear a stuck duel (closes TetraMaster.exe)')
+        chat('//tm debug - toggle connection progress messages')
         chat('//tm help - show this message')
     else
         chat('unknown command. Use //tm help')
@@ -528,8 +553,8 @@ windower.register_event('prerender', function()
 end)
 
 windower.register_event('logout', function()
-    if duel_bridge.is_active() then
-        duel_bridge.shutdown('manual_resign')
+    if duel_bridge.is_busy() then
+        duel_bridge.force_reset(false)
     end
     clear_duel_state()
 end)

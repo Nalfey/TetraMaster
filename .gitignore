@@ -6,3 +6,14 @@ TetraMaster.exe
 tools/cloudflared.exe
 *.key
 Oracle/
+# Local VM / relay ops (not published)
+build/audit-oci.ps1
+build/deploy-relay.ps1
+build/setup-cloudflare-tunnel.ps1
+build/setup-cloudflare-dns.ps1
+build/setup-cloudflare-tunnel.sh
+build/cloudflared-config.yml
+build/vm-prep.sh
+build/tetramaster-cloudflared.service
+build/tetramaster-relay.service
+build/tetramaster-ws-bridge.service

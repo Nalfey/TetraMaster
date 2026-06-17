@@ -329,7 +329,7 @@ function ws.tick_handshake(conn)
 
   if not conn.handshake_sent then
     local ok, send_err = send_bytes(conn.sock, conn.http_request)
-    if send_err then
+    if not ok and send_err then
       return false, send_err
     end
     if not ok then
@@ -339,7 +339,14 @@ function ws.tick_handshake(conn)
     conn.http_request = nil
   end
 
-  local chunk, recv_err, partial = conn.sock:receive(1024)
+  local chunk, recv_err, partial
+  local recv_ok, r1, r2, r3 = pcall(function()
+    return conn.sock:receive(1024)
+  end)
+  if not recv_ok then
+    return false, tostring(r1)
+  end
+  chunk, recv_err, partial = r1, r2, r3
   if chunk and chunk ~= "" then
     conn.http_buffer = conn.http_buffer .. chunk
   elseif partial and partial ~= "" then
