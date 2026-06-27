@@ -12,6 +12,7 @@ Restart=on-failure
 RestartSec=5
 Environment=TM_RELAY_BIND=127.0.0.1
 Environment=TM_RELAY_PORT=19876
+Environment=TM_RELAY_MAX_PER_IP=2
 
 [Install]
 WantedBy=multi-user.target

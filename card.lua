@@ -98,12 +98,18 @@ function Card.from_snapshot(snapshot, side)
 end
 
 function Card:draw(x, y, s, card_height, card_width)
-    local quad = cards_q[self.card_id]
-    if not quad then
-        return
-    end
+    s = s or 1
+    local image = pol_card_images and pol_card_images[self.card_id]
+    if image then
+        love.graphics.draw(image, x, y, 0, s, s)
+    else
+        local quad = cards_q[self.card_id]
+        if not quad then
+            return
+        end
 
-    love.graphics.draw(graphic_sheet, quad, x, y, 0, s, s)
+        love.graphics.draw(graphic_sheet, quad, x, y, 0, s, s)
+    end
 
     local card_height = card_height or 51
     local card_width = card_width or 42

@@ -162,18 +162,15 @@ end
 
 local function wrap_tls(ssl_module, tcp, host)
   local attempts = {
-    { mode = "client", protocol = "tlsv1_2", verify = "none", options = "all" },
-    { mode = "client", protocol = "any", verify = "none", options = "all" },
-    { mode = "client", verify = "none", options = "all" },
+    { mode = "client", protocol = "tlsv1_2", verify = "none", servername = host },
+    { mode = "client", protocol = "tlsv1_2", verify = "none" },
+    { mode = "client", verify = "none" },
   }
 
   for _, params in ipairs(attempts) do
-    local wrapped = ssl_module.wrap(tcp, params)
-    if wrapped then
+    local ok, wrapped = pcall(ssl_module.wrap, tcp, params)
+    if ok and wrapped then
       wrapped:settimeout(0)
-      if wrapped.sni then
-        wrapped:sni(host)
-      end
       return wrapped
     end
   end
@@ -181,16 +178,173 @@ local function wrap_tls(ssl_module, tcp, host)
   return nil, "ssl wrap failed"
 end
 
+function ws.handshake_blocking(host, port, path)
+  path = path or "/"
+  port = port or 443
+  local deadline = os.clock() + 5
+
+  local tcp = socket.tcp()
+  tcp:settimeout(4)
+
+  local ok, err = tcp:connect(host, port)
+  if not ok then
+    tcp:close()
+    return nil, "connect failed: " .. tostring(err)
+  end
+
+  local sock = tcp
+  local tls_sock = nil
+  local ssl_module = nil
+  local use_tls = port == 443
+
+  if use_tls then
+    local ssl_ok, ssl = pcall(require, "ssl")
+    if not ssl_ok then
+      tcp:close()
+      return nil, "ssl module required for wss"
+    end
+    ssl_module = ssl
+
+    local wrapped = nil
+    local last_wrap_err = nil
+    local param_sets = {
+      { mode = "client", protocol = "tlsv1_2", verify = "none" },
+      { mode = "client", verify = "none", options = "all" },
+      { mode = "client", verify = "none" },
+    }
+
+    for _, params in ipairs(param_sets) do
+      local wrap_ok, candidate = pcall(ssl.wrap, tcp, params)
+      if wrap_ok and candidate then
+        wrapped = candidate
+        break
+      end
+      last_wrap_err = candidate
+    end
+
+    if not wrapped then
+      tcp:close()
+      return nil, "ssl wrap failed: " .. tostring(last_wrap_err)
+    end
+
+    pcall(function()
+      if wrapped.sni and host and host ~= "" then
+        wrapped:sni(host)
+      end
+    end)
+
+    wrapped:settimeout(4)
+    local tls_attempts = 0
+    while os.clock() < deadline do
+      tls_attempts = tls_attempts + 1
+      if tls_attempts > 40 then
+        wrapped:close()
+        return nil, "tls handshake timed out"
+      end
+      local handshake_ok, handshake_err = wrapped:dohandshake()
+      if handshake_ok then
+        break
+      end
+      if handshake_err == "wantread" or handshake_err == "wantwrite" or handshake_err == "timeout" then
+        if handshake_err == "timeout" and tls_attempts > 1 then
+          -- keep trying until deadline
+        end
+      else
+        wrapped:close()
+        return nil, "tls handshake failed: " .. tostring(handshake_err)
+      end
+    end
+
+    if os.clock() >= deadline then
+      wrapped:close()
+      return nil, "tls handshake timed out"
+    end
+
+    wrapped:settimeout(0)
+    sock = wrapped
+    tls_sock = wrapped
+  end
+
+  local key = base64_encode(random_key())
+  local request = table.concat({
+    "GET " .. path .. " HTTP/1.1",
+    "Host: " .. host,
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    "Sec-WebSocket-Key: " .. key,
+    "Sec-WebSocket-Version: 13",
+    "",
+    "",
+  }, "\r\n")
+
+  sock:settimeout(4)
+  local sent_ok, send_err = sock:send(request)
+  if not sent_ok then
+    sock:close()
+    return nil, "ws request failed: " .. tostring(send_err)
+  end
+
+  local http_buffer = ""
+  while os.clock() < deadline do
+    local chunk, recv_err, partial = sock:receive(1024)
+    if chunk and chunk ~= "" then
+      http_buffer = http_buffer .. chunk
+    elseif partial and partial ~= "" then
+      http_buffer = http_buffer .. partial
+    elseif recv_err and recv_err ~= "timeout" then
+      sock:close()
+      return nil, "ws response failed: " .. tostring(recv_err)
+    end
+
+    local header_end = http_buffer:find("\r\n\r\n", 1, true)
+    if header_end then
+      local headers = http_buffer:sub(1, header_end - 1)
+      if not headers:match("^HTTP/1%.1 101") then
+        local status = headers:match("^(HTTP/[^\r\n]+)") or headers
+        sock:close()
+        return nil, "bad websocket handshake: " .. status
+      end
+      http_buffer = http_buffer:sub(header_end + 4)
+      break
+    end
+  end
+
+  if os.clock() >= deadline then
+    sock:close()
+    return nil, "ws handshake timed out"
+  end
+
+  sock:settimeout(0)
+
+  return {
+    tcp = tcp,
+    sock = sock,
+    tls_sock = tls_sock,
+    host = host,
+    port = port,
+    path = path,
+    use_tls = use_tls,
+    ssl_module = ssl_module,
+    tcp_connected = true,
+    tls_ready = true,
+    connection_ready = true,
+    handshake_sent = true,
+    handshake_done = true,
+    http_request = nil,
+    pending_send = nil,
+    recv_buffer = "",
+    http_buffer = http_buffer,
+    ws_key = key,
+    connect_host = host,
+    connect_port = port,
+  }
+end
+
 function ws.connect(host, port, path)
   local tcp = socket.tcp()
   tcp:settimeout(0)
 
   local use_tls = port == 443
-  local ok, err = tcp:connect(host, port)
-  if not ok and err ~= "timeout" then
-    tcp:close()
-    return nil, err
-  end
 
   local conn = {
     tcp = tcp,

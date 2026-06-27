@@ -9,6 +9,8 @@ Players should download **[GitHub Releases](https://github.com/Nalfey/TetraMaste
 | --- | --- |
 | `build-fused.ps1` | Build `runtime\TetraMaster.exe` from source (requires [LOVE 11.5](https://love2d.org/)). |
 | `package-release.ps1` | Create `TetraMaster.zip` for players (includes `runtime\`, excludes server/relay code). |
+| `audit-oci.ps1` | Audit Oracle Cloud resources (security list, orphan volumes). |
+| `ssh-vm.ps1` | SSH to the relay VM (key from `W:\TetraMaster\Oracle\`). |
 
 Typical release flow:
 

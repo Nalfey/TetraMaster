@@ -3,12 +3,15 @@ runtime/
 sync/
 TetraMaster.exe
 *.love
-tools/cloudflared.exe
+tools/
+# Per-player settings (settings.xml)
+data/
 *.key
 Oracle/
 # Local VM / relay ops (not published)
 build/audit-oci.ps1
 build/deploy-relay.ps1
+build/ssh-vm.ps1
 build/setup-cloudflare-tunnel.ps1
 build/setup-cloudflare-dns.ps1
 build/setup-cloudflare-tunnel.sh

@@ -12,6 +12,7 @@ Environment=TM_WS_BIND=127.0.0.1
 Environment=TM_WS_PORT=8080
 Environment=TM_WS_RELAY_HOST=127.0.0.1
 Environment=TM_WS_RELAY_PORT=19876
+Environment=TM_WS_MAX_PER_IP=2
 ExecStart=/opt/tetramaster/venv/bin/python /opt/tetramaster/bin/ws_bridge.py
 Restart=on-failure
 RestartSec=5
