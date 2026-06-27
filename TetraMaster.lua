@@ -1,12 +1,13 @@
 _addon = {
     name = 'TetraMaster',
     author = 'Nalfey',
-    version = '1.1.6',
+    version = '1.2.0',
     description = 'Launch Tetra Master and duel party members.',
 }
 
 local protocol = dofile(windower.addon_path .. 'protocol.lua')
 local duel_bridge = dofile(windower.addon_path .. 'duel_bridge.lua')
+local player_settings = dofile(windower.addon_path .. 'player_settings.lua')
 
 local runtime_dir = windower.addon_path .. 'runtime\\'
 local exe_name = 'TetraMaster.exe'
@@ -19,6 +20,57 @@ local relay_host_override = nil
 local DEFAULT_RELAY_HOST = 'relay.tetramasters.uk'
 local RELAY_DOMAIN = 'tetramasters.uk'
 local debug_mode = false
+local party_id_cache = {}
+local host_start_session = nil
+local alliance_party_ok, alliance_party = pcall(require, 'party')
+
+local PARTY_MEMBER_SLOTS = {}
+for i = 0, 5 do
+    PARTY_MEMBER_SLOTS[#PARTY_MEMBER_SLOTS + 1] = 'p' .. i
+end
+for i = 0, 5 do
+    PARTY_MEMBER_SLOTS[#PARTY_MEMBER_SLOTS + 1] = 'a1' .. i
+end
+for i = 0, 5 do
+    PARTY_MEMBER_SLOTS[#PARTY_MEMBER_SLOTS + 1] = 'a2' .. i
+end
+
+local function remember_party_id(name, id)
+    if name and id then
+        party_id_cache[name:lower()] = id
+    end
+end
+
+local function cached_party_id(name)
+    if not name then
+        return nil
+    end
+    return party_id_cache[name:lower()]
+end
+
+local function refresh_party_id_cache()
+    local party = windower.ffxi.get_party()
+    if not party then
+        return
+    end
+
+    for _, slot in ipairs(PARTY_MEMBER_SLOTS) do
+        local member = party[slot]
+        if member and member.name then
+            local id = member.id or (member.mob and member.mob.id)
+            remember_party_id(member.name, id)
+        end
+    end
+
+    if alliance_party_ok and alliance_party then
+        for i = 1, 18 do
+            local member = alliance_party[i]
+            if member and member.name and member.id then
+                remember_party_id(member.name, member.id)
+            end
+        end
+    end
+end
 
 local function chat(msg)
     windower.add_to_chat(207, 'TetraMaster: ' .. msg)
@@ -44,19 +96,279 @@ end
 
 local function find_party_member(name)
     local party = windower.ffxi.get_party()
-    if not party then
+    if not party or not name then
         return nil
     end
 
     local target = name:lower()
-    for i = 0, 5 do
-        local member = party['p' .. i]
+    for _, slot in ipairs(PARTY_MEMBER_SLOTS) do
+        local member = party[slot]
         if member and member.name and member.name:lower() == target then
             return member
         end
     end
 
     return nil
+end
+
+local function party_display_name(name)
+    local member = find_party_member(name)
+    if member and member.name then
+        return member.name
+    end
+    return name
+end
+
+local function alliance_id_for_name(name)
+    if not alliance_party_ok or not alliance_party or not name then
+        return nil
+    end
+
+    local target = name:lower()
+    for i = 1, 18 do
+        local member = alliance_party[i]
+        if member and member.name and member.name:lower() == target and member.id then
+            return member.id
+        end
+    end
+
+    return nil
+end
+
+local function member_character_id(member)
+    if not member then
+        return nil
+    end
+
+    if member.id then
+        return member.id
+    end
+
+    if member.mob and member.mob.id then
+        return member.mob.id
+    end
+
+    return nil
+end
+
+local function character_id_for_name(name)
+    if not name then
+        return nil
+    end
+
+    refresh_party_id_cache()
+
+    local player = windower.ffxi.get_player()
+    if player and player.name and player.name:lower() == name:lower() then
+        remember_party_id(player.name, player.id)
+        return player.id
+    end
+
+    local cached = cached_party_id(name)
+    if cached then
+        return cached
+    end
+
+    local member = find_party_member(name)
+    local id = member_character_id(member)
+    if id then
+        remember_party_id(member.name, id)
+        return id
+    end
+
+    id = alliance_id_for_name(name)
+    if id then
+        remember_party_id(name, id)
+        return id
+    end
+
+    local mob = windower.ffxi.get_mob_by_name(name)
+    if mob and mob.id then
+        remember_party_id(name, mob.id)
+        return mob.id
+    end
+
+    return nil
+end
+
+local function make_duel_session_id(player_a, player_b)
+    player_a = party_display_name(player_a)
+    player_b = party_display_name(player_b)
+
+    local id_a = character_id_for_name(player_a)
+    local id_b = character_id_for_name(player_b)
+    if not id_a or not id_b then
+        return nil
+    end
+
+    return protocol.make_session_id(player_a, player_b, id_a, id_b)
+end
+
+local function pid_log_path()
+    return windower.addon_path .. 'data\\pid.log'
+end
+
+local function append_pid_log(text)
+    if not debug_mode then
+        return false
+    end
+
+    local path = pid_log_path()
+    local dir = windower.addon_path .. 'data'
+    os.execute('if not exist "' .. dir:gsub('/', '\\') .. '" mkdir "' .. dir:gsub('/', '\\') .. '"')
+
+    local file = io.open(path, 'a')
+    if not file then
+        return false
+    end
+
+    file:write(text)
+    if not text:match('\n$') then
+        file:write('\n')
+    end
+    file:close()
+    return true
+end
+
+local function character_id_lookup_details(name)
+    refresh_party_id_cache()
+
+    local info = {
+        query_name = name,
+        party_name = nil,
+        slot = nil,
+        zone = nil,
+        self_id = nil,
+        member_id = nil,
+        member_mob_id = nil,
+        alliance_id = nil,
+        cached_id = cached_party_id(name),
+        mob_by_name_id = nil,
+        resolved_id = nil,
+    }
+
+    if not name then
+        return info
+    end
+
+    local player = windower.ffxi.get_player()
+    if player and player.name and player.name:lower() == name:lower() then
+        info.party_name = player.name
+        info.self_id = player.id
+        info.resolved_id = player.id
+        return info
+    end
+
+    local member = find_party_member(name)
+    if member then
+        info.party_name = member.name
+        info.zone = member.zone
+        info.member_id = member.id
+        info.member_mob_id = member.mob and member.mob.id or nil
+
+        local party = windower.ffxi.get_party()
+        if party then
+            for _, slot in ipairs(PARTY_MEMBER_SLOTS) do
+                local entry = party[slot]
+                if entry and entry.name and entry.name:lower() == member.name:lower() then
+                    info.slot = slot
+                    break
+                end
+            end
+        end
+    end
+
+    info.alliance_id = alliance_id_for_name(name)
+
+    local mob = windower.ffxi.get_mob_by_name(name)
+    if mob and mob.id then
+        info.mob_by_name_id = mob.id
+    end
+
+    info.resolved_id = character_id_for_name(name)
+    return info
+end
+
+local function format_lookup_details(details)
+    local lines = {
+        string.format('  query=%s party_name=%s slot=%s zone=%s',
+            tostring(details.query_name),
+            tostring(details.party_name),
+            tostring(details.slot),
+            tostring(details.zone)),
+        string.format('    self_id=%s member.id=%s member.mob.id=%s alliance.id=%s cache=%s mob_by_name=%s => resolved=%s',
+            tostring(details.self_id),
+            tostring(details.member_id),
+            tostring(details.member_mob_id),
+            tostring(details.alliance_id),
+            tostring(details.cached_id),
+            tostring(details.mob_by_name_id),
+            tostring(details.resolved_id)),
+    }
+    return table.concat(lines, '\n')
+end
+
+local function log_party_ids()
+    refresh_party_id_cache()
+
+    local player = windower.ffxi.get_player()
+    local lines = {
+        '',
+        '========== ' .. os.date('%Y-%m-%d %H:%M:%S') .. ' //tm pid ==========',
+        'Session format: <name_a>_<name_b>_<id_a + id_b> (names sorted A-Z, same either way)',
+        'Duel session uses both party character IDs; order of who challenged does not change the session.',
+    }
+
+    if not player then
+        lines[#lines + 1] = 'Not logged in.'
+        append_pid_log(table.concat(lines, '\n'))
+        return
+    end
+
+    lines[#lines + 1] = string.format('Self: %s (id=%s)', player.name, tostring(player.id))
+    lines[#lines + 1] = 'Party members:'
+
+    local party = windower.ffxi.get_party()
+    local seen = {}
+
+    for _, slot in ipairs(PARTY_MEMBER_SLOTS) do
+        local member = party and party[slot]
+        if member and member.name and not seen[member.name:lower()] then
+            seen[member.name:lower()] = true
+            local details = character_id_lookup_details(member.name)
+            lines[#lines + 1] = format_lookup_details(details)
+        end
+    end
+
+    if alliance_party_ok and alliance_party then
+        lines[#lines + 1] = 'Alliance package:'
+        for i = 1, 18 do
+            local member = alliance_party[i]
+            if member and member.name and not seen[member.name:lower()] then
+                seen[member.name:lower()] = true
+                lines[#lines + 1] = string.format('  [%d] %s id=%s zone_id=%s',
+                    i,
+                    tostring(member.name),
+                    tostring(member.id),
+                    tostring(member.zone_id))
+            end
+        end
+    else
+        lines[#lines + 1] = 'Alliance package: unavailable'
+    end
+
+    lines[#lines + 1] = 'Canonical duel sessions (same on both clients):'
+    for _, slot in ipairs(PARTY_MEMBER_SLOTS) do
+        local member = party and party[slot]
+        if member and member.name and member.name:lower() ~= player.name:lower() then
+            local session_id = make_duel_session_id(player.name, member.name)
+            lines[#lines + 1] = string.format('  with %s => %s',
+                member.name,
+                session_id or '(could not resolve IDs)')
+        end
+    end
+
+    append_pid_log(table.concat(lines, '\n'))
 end
 
 local function in_party_with(name)
@@ -154,7 +466,7 @@ local function is_relay_connect(host)
         return false
     end
     local lower = host:lower()
-    if lower == DEFAULT_RELAY_HOST:lower() or lower == '145.241.251.131' then
+    if lower == DEFAULT_RELAY_HOST:lower() then
         return true
     end
     if lower == RELAY_DOMAIN or lower:sub(-#('.' .. RELAY_DOMAIN)) == '.' .. RELAY_DOMAIN then
@@ -204,6 +516,12 @@ local function begin_duel_as_host(challenge)
         return
     end
 
+    if host_start_session and protocol.sessions_equal(host_start_session, challenge.session_id) then
+        return
+    end
+
+    host_start_session = challenge.session_id
+
     local relay_host = get_relay_host()
     if relay_host then
         start_relay_duel(challenge.session_id, challenge.challenger, challenge.guest, relay_host, relay_port_for(relay_host), 'host')
@@ -224,16 +542,44 @@ local function set_pending_challenge(session_id, challenger, guest)
 end
 
 local function notify_guest_challenge(session_id, challenger, guest)
+    set_pending_challenge(session_id, challenger, guest)
+
     local session_key = session_id:lower()
-    if notified_challenges[session_key] and pending_challenge and protocol.sessions_equal(pending_challenge.session_id, session_id) then
-        set_pending_challenge(session_id, challenger, guest)
+    if notified_challenges[session_key] then
         return
     end
 
-    set_pending_challenge(session_id, challenger, guest)
     notified_challenges[session_key] = true
     chat(challenger .. ' challenged you to a TetraMaster duel!')
     chat('Type //tm accept or //tm decline')
+end
+
+local function append_duel_log(text)
+    append_pid_log(text)
+end
+
+local function refresh_pending_session(challenge)
+    if not challenge then
+        return nil
+    end
+
+    local session_id = make_duel_session_id(challenge.challenger, challenge.guest)
+    if session_id then
+        challenge.session_id = session_id
+    end
+    return session_id
+end
+
+local function prewarm_host_relay(session_id, challenger, guest)
+    local relay_host = get_relay_host()
+    if not relay_host then
+        return
+    end
+
+    append_duel_log(string.format('%s prewarm-host challenger=%s guest=%s session=%s',
+        os.date('%Y-%m-%d %H:%M:%S'), challenger, guest, session_id))
+    start_relay_duel(session_id, challenger, guest, relay_host, relay_port_for(relay_host), 'host')
+    debug_chat('connecting to relay while waiting for accept...')
 end
 
 local function issue_challenge(target_name)
@@ -250,16 +596,43 @@ local function issue_challenge(target_name)
     end
 
     local me = me_or_err
-    local session_id = protocol.make_session_id(me, target_name)
-    set_pending_challenge(session_id, me, target_name)
+    local target = party_display_name(target_name)
+    local session_id = make_duel_session_id(me, target)
+    if not session_id then
+        chat('could not resolve character IDs for the duel.')
+        chat('Make sure ' .. target .. ' is in your party and try again.')
+        return
+    end
+    set_pending_challenge(session_id, me, target)
 
-    announce_challenge(me, target_name)
-    send_ipc_handshake('CHALLENGE', session_id, me, target_name)
-    chat('challenge sent to ' .. target_name .. '. Waiting for accept...')
-    if not get_relay_host() then
+    append_duel_log(string.format('%s issue challenger=%s guest=%s session=%s',
+        os.date('%Y-%m-%d %H:%M:%S'), me, target, session_id))
+
+    send_ipc_handshake('CHALLENGE', session_id, me, target)
+    announce_challenge(me, target)
+    chat('challenge sent to ' .. target .. '. Waiting for accept...')
+    if get_relay_host() then
+        prewarm_host_relay(session_id, me, target)
+    else
         chat('host: allow TCP ' .. protocol.DEFAULT_PORT .. ' in Windows Firewall.')
         chat('and forward port ' .. protocol.DEFAULT_PORT .. ' on your router, or use Tailscale with //tm hostip <ip>.')
     end
+end
+
+local function start_guest_relay_duel(challenge)
+    local relay_host = get_relay_host()
+    if not relay_host then
+        return
+    end
+
+    start_relay_duel(
+        challenge.session_id,
+        challenge.guest,
+        challenge.challenger,
+        relay_host,
+        relay_port_for(relay_host),
+        'guest')
+    debug_chat('accepted. Connecting to relay...')
 end
 
 local function accept_challenge()
@@ -274,16 +647,25 @@ local function accept_challenge()
         return
     end
 
+    local session_id = refresh_pending_session(pending_challenge)
+    if not session_id then
+        chat('could not resolve character IDs for the duel.')
+        chat('Try //tm pid and make sure you are still in party.')
+        return
+    end
+
     local challenge = pending_challenge
     pending_challenge = nil
+
+    append_duel_log(string.format('%s accept challenger=%s guest=%s session=%s',
+        os.date('%Y-%m-%d %H:%M:%S'), challenge.challenger, challenge.guest, challenge.session_id))
 
     announce_accept(me)
     send_ipc_handshake('ACCEPT', challenge.session_id, me)
 
     local relay_host = get_relay_host()
     if relay_host then
-        start_relay_duel(challenge.session_id, challenge.guest, challenge.challenger, relay_host, relay_port_for(relay_host), 'guest')
-        debug_chat('accepted. Connecting to relay...')
+        start_guest_relay_duel(challenge)
     else
         pending_connect = challenge
         chat('accepted. Waiting for ' .. challenge.challenger .. ' to host the duel...')
@@ -320,12 +702,13 @@ local function handle_tm_message(msg)
             return
         end
 
-        notify_guest_challenge(msg.session, msg.arg1, msg.arg2)
+        local session_id = make_duel_session_id(msg.arg1, msg.arg2) or msg.session
+        notify_guest_challenge(session_id, msg.arg1, msg.arg2)
         return
     end
 
     if msg.kind == 'ACCEPT' then
-        if not pending_challenge or not protocol.sessions_equal(pending_challenge.session_id, msg.session) then
+        if not pending_challenge then
             return
         end
 
@@ -333,20 +716,29 @@ local function handle_tm_message(msg)
             return
         end
 
+        if msg.arg1 and pending_challenge.guest:lower() ~= msg.arg1:lower() then
+            return
+        end
+
         local challenge = pending_challenge
         pending_challenge = nil
+        refresh_pending_session(challenge)
+        append_duel_log(string.format('%s host-start challenger=%s guest=%s session=%s',
+            os.date('%Y-%m-%d %H:%M:%S'), challenge.challenger, challenge.guest, challenge.session_id))
         begin_duel_as_host(challenge)
         return
     end
 
     if msg.kind == 'CONNECT' then
-        if not pending_connect or not protocol.sessions_equal(pending_connect.session_id, msg.session) then
+        if not pending_connect then
             return
         end
 
         if me:lower() ~= pending_connect.guest:lower() then
             return
         end
+
+        refresh_pending_session(pending_connect)
 
         local challenge = pending_connect
         pending_connect = nil
@@ -365,6 +757,7 @@ local function handle_tm_message(msg)
         if pending_challenge and protocol.sessions_equal(pending_challenge.session_id, msg.session) then
             if me:lower() == pending_challenge.challenger:lower() then
                 pending_challenge = nil
+                duel_bridge.cancel_relay_session()
                 chat(msg.arg1 .. ' declined your duel.')
             end
         end
@@ -394,6 +787,9 @@ local function handle_friendly_accept(accepter)
 
     local challenge = pending_challenge
     pending_challenge = nil
+    refresh_pending_session(challenge)
+    append_duel_log(string.format('%s host-start challenger=%s guest=%s session=%s',
+        os.date('%Y-%m-%d %H:%M:%S'), challenge.challenger, challenge.guest, challenge.session_id))
     begin_duel_as_host(challenge)
 end
 
@@ -412,6 +808,7 @@ local function handle_friendly_decline(decliner)
     end
 
     pending_challenge = nil
+    duel_bridge.cancel_relay_session()
     chat(decliner .. ' declined your duel.')
 end
 
@@ -419,6 +816,7 @@ local function clear_duel_state()
     pending_challenge = nil
     pending_connect = nil
     notified_challenges = {}
+    host_start_session = nil
 end
 
 duel_bridge.set_session_end_handler(function(reason)
@@ -438,7 +836,10 @@ local function handle_incoming_text(text)
     if challenger and guest then
         local me = player_name()
         if me and me:lower() == guest:lower() then
-            notify_guest_challenge(protocol.make_session_id(challenger, guest), challenger, guest)
+            local session_id = make_duel_session_id(challenger, guest)
+            if session_id then
+                notify_guest_challenge(session_id, challenger, guest)
+            end
         end
         return
     end
@@ -505,13 +906,25 @@ local function handle_command(command, ...)
         if duel_bridge.get_session_id() then
             send_ipc_handshake('RESIGN', duel_bridge.get_session_id(), player_name() or 'unknown')
         end
+        duel_bridge.cancel_relay_session()
         duel_bridge.force_reset(true)
         clear_duel_state()
         chat('TetraMaster reset. Reload with //lua r TetraMaster if play/duel still fails.')
     elseif command == 'debug' then
         debug_mode = not debug_mode
         duel_bridge.set_debug(debug_mode)
-        chat('debug mode ' .. (debug_mode and 'on' or 'off') .. '.')
+        if debug_mode then
+            chat('debug mode on. //tm pid writes ID diagnostics to data/pid.log (not chat).')
+        else
+            chat('debug mode off.')
+        end
+    elseif command == 'pid' then
+        if not debug_mode then
+            chat('pid diagnostics require debug mode. Use //tm debug first.')
+            return
+        end
+        log_party_ids()
+        chat('party ID details written to data/pid.log')
     elseif command == 'help' then
         chat('//tm play - solo game')
         chat('//tm duel <name> - challenge a party member')
@@ -523,7 +936,8 @@ local function handle_command(command, ...)
         chat('//tm accept / //tm decline - respond to a challenge')
         chat('//tm resign - leave an active duel')
         chat('//tm reset - force-clear a stuck duel (closes TetraMaster.exe)')
-        chat('//tm debug - toggle connection progress messages')
+        chat('//tm debug - toggle debug mode (connection progress + //tm pid)')
+        chat('Edit data/settings.xml — <global> default, plus a section per FFXI character (e.g. <nalfey>).')
         chat('//tm help - show this message')
     else
         chat('unknown command. Use //tm help')
@@ -549,6 +963,7 @@ windower.register_event('incoming text', function(original, modified, mode)
 end)
 
 windower.register_event('prerender', function()
+    refresh_party_id_cache()
     duel_bridge.tick()
 end)
 
@@ -559,6 +974,17 @@ windower.register_event('logout', function()
     clear_duel_state()
 end)
 
+windower.register_event('zone change', function()
+    refresh_party_id_cache()
+end)
+
 windower.register_event('load', function()
+    refresh_party_id_cache()
+    local ok, err = pcall(function()
+        player_settings.load(windower.addon_path, player_name())
+    end)
+    if not ok and debug_mode then
+        append_pid_log('player_settings.load error: ' .. tostring(err))
+    end
     chat('loaded. //tm play or //tm duel <party member>')
 end)

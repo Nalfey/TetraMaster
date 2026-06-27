@@ -394,6 +394,10 @@ function is_placement_resolving()
   return placement.active
 end
 
+function is_match_resolution_active()
+  return placement.active or is_battle_anim_active() or is_capture_fx_active()
+end
+
 function is_battle_select_active()
   return placement.active and placement.phase == "select_battle"
 end

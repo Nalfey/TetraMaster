@@ -68,6 +68,18 @@ function init_graphics()
   background_q = love.graphics.newQuad(10, 498, 320, 240, sheet_w, sheet_h)
   grid_q = love.graphics.newQuad(340, 498, 224, 240, sheet_w, sheet_h)
   cards_q = init_card_quads()
+  pol_card_images = {}
+
+  for i = 1, 250 do
+    local path = string.format("assets/sprites/Cards/%03d.png", i)
+    local ok, image = pcall(love.graphics.newImage, path)
+    if ok then
+      image:setFilter("nearest", "nearest")
+      pol_card_images[i] = image
+    end
+  end
+
+  init_character_portraits()
 
   card_back_blue_q = love.graphics.newQuad(18, 822, 42, 51, sheet_w, sheet_h)
   card_back_red_q = love.graphics.newQuad(66, 822, 42, 51, sheet_w, sheet_h)

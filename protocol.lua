@@ -291,13 +291,15 @@ function protocol.parse_friendly_decline(text)
   return text:match("^([%w]+) declines the TetraMaster duel%.$")
 end
 
-function protocol.make_session_id(name_a, name_b)
-  local a = name_a:lower()
-  local b = name_b:lower()
-  if a < b then
-    return a .. "_" .. b
+function protocol.make_session_id(player_a, player_b, id_a, id_b)
+  local name_a = player_a:lower()
+  local name_b = player_b:lower()
+  if name_a > name_b then
+    name_a, name_b = name_b, name_a
   end
-  return b .. "_" .. a
+
+  local id_sum = math.floor(tonumber(id_a) + tonumber(id_b))
+  return name_a .. "_" .. name_b .. "_" .. tostring(id_sum)
 end
 
 function protocol.sessions_equal(session_a, session_b)

@@ -87,6 +87,9 @@ local function draw_duel_status()
 end
 
 local function start_new_match(game)
+  if not is_duel_active() then
+    roll_opponent_character()
+  end
   setup_board()
   game:gotoState("CoinToss")
   game:load()
@@ -99,6 +102,7 @@ function Game:initialize()
     play_music()
     init_graphics()
     cards = require("cards")
+    init_character_session()
 
     self.ai_turn_counter = {
         cur_time = 0,
@@ -166,6 +170,8 @@ function Game:draw()
     -- Player hand (always face-up, right side)
     hands["blue"]:draw(HAND_LAYOUT.blue.x, HAND_LAYOUT.blue.y)
 
+    draw_character_portraits()
+
     local red_score_q = score_quad("red", count_score("red"))
     local blue_score_q = score_quad("blue", count_score("blue"))
 
@@ -215,17 +221,14 @@ function Game:update(dt)
     update_cursor_animation(dt)
     update_placement(dt)
 
-    if is_coin_toss_active() or is_placement_resolving() or is_capture_fx_active() then
+    if is_coin_toss_active() or is_match_resolution_active() then
       return
     end
 
     if is_duel_active() then
-      if check_endgame() then
-        if is_duel_host() then
-          duel_send_game_over()
-        end
-        self:gotoState("EndGame")
-        self:load()
+      if check_endgame() and is_duel_host() then
+        duel_send_game_over()
+        duel_begin_endgame(self)
       end
       return
     end
@@ -266,6 +269,7 @@ function EndGame:load()
     self.outcome_label = "DRAW"
     play_sound("tie_game")
   elseif blue_score > red_score then
+    record_character_victory("blue")
     if red_score == 0 then
       self.outcome_label = "PERFECT"
       play_sound("perfect_game")
@@ -274,6 +278,7 @@ function EndGame:load()
       play_sound("win_game")
     end
   else
+    record_character_victory("red")
     self.outcome_label = "LOSE"
     play_sound("lose_game")
   end

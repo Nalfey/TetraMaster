@@ -23,7 +23,7 @@ function Hand:initialize(side, ai, opts)
 
     local i = 0
     while #self.cards < 5 do
-        local base_card = BASE_CARDS[math.random(1, #BASE_CARDS)]
+        local base_card = BASE_CARDS[math.random(1, BASE_CARD_COUNT)]
 
         if base_card ~= nil and base_card.id ~= nil then
             local c = Card:new(base_card, self.side)

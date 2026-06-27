@@ -15,6 +15,7 @@ DUEL = {
   match_ready = false,
   last_match_state = nil,
   last_ready_ping = 0,
+  pending_game_over = nil,
 }
 
 local function role_to_local_side(role)
@@ -272,6 +273,7 @@ local function host_begin_match(rematch)
   send({
     type = rematch and "rematch_start" or "match_start",
     state = state,
+    character = get_local_character_index(),
   })
   apply_match_state(state)
 end
@@ -450,12 +452,11 @@ local function guest_apply_place_card(msg)
     return
   end
 
-  remove_card_from_hand(hand, msg)
-
   local card = card_from_snapshot(msg.card)
   current_turn = local_side
 
   place_card(msg.gx, msg.gy, card, function()
+    remove_card_from_hand(hand, msg)
     keyboard_focus.area = "hand"
     reset_keyboard_focus()
   end, {
@@ -467,13 +468,21 @@ local function guest_handle_message(msg)
   if msg.type == "hello" then
     if not DUEL.connected then
       DUEL.connected = true
-      send({ type = "duel_ready" })
+      send({ type = "duel_ready", character = get_local_character_index() })
     end
+    return
+  end
+
+  if msg.type == "character" then
+    set_opponent_character_index(msg.character)
     return
   end
 
   if msg.type == "match_start" or msg.type == "rematch_start" then
     DUEL.connected = true
+    if msg.character then
+      set_opponent_character_index(msg.character)
+    end
     if msg.state then
       apply_match_state(msg.state)
       if Game then
@@ -509,10 +518,8 @@ local function guest_handle_message(msg)
 
   if msg.type == "game_over" then
     DUEL.waiting = false
-    if Game then
-      Game:gotoState("EndGame")
-      Game:load()
-    end
+    DUEL.pending_game_over = msg
+    duel_try_finish_game_over(Game)
     return
   end
 
@@ -529,12 +536,17 @@ local function host_handle_message(msg)
   end
 
   if msg.type == "duel_ready" then
+    if msg.character then
+      set_opponent_character_index(msg.character)
+      send({ type = "character", character = get_local_character_index() })
+    end
     if not DUEL.match_ready then
       duel_start_if_ready(Game)
     elseif DUEL.last_match_state then
       send({
         type = "match_start",
         state = DUEL.last_match_state,
+        character = get_local_character_index(),
       })
     end
     return
@@ -566,7 +578,7 @@ function duel_poll()
   if not DUEL.is_host and DUEL.connected and not DUEL.match_ready then
     local now = os.clock()
     if now - (DUEL.last_ready_ping or 0) > 2 then
-      send({ type = "duel_ready" })
+      send({ type = "duel_ready", character = get_local_character_index() })
       DUEL.last_ready_ping = now
     end
   end
@@ -585,4 +597,26 @@ function duel_send_game_over()
   if DUEL.is_host then
     send({ type = "game_over" })
   end
+end
+
+function duel_begin_endgame(game)
+  if not game then
+    return
+  end
+
+  game:gotoState("EndGame")
+  game:load()
+end
+
+function duel_try_finish_game_over(game)
+  if not DUEL.pending_game_over or not game then
+    return
+  end
+
+  if is_match_resolution_active() or is_coin_toss_active() then
+    return
+  end
+
+  DUEL.pending_game_over = nil
+  duel_begin_endgame(game)
 end

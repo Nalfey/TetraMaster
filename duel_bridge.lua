@@ -32,6 +32,8 @@ local bridge = {
   relay_session_ready = false,
   pending_game_args = nil,
   join_sent = false,
+  wss_connecting = false,
+  wss_connect_gen = 0,
   game_launched = false,
   solo_session = false,
   launch_attempts = 0,
@@ -66,9 +68,30 @@ local HEARTBEAT_CHECK_INTERVAL = 2
 local PROCESS_COUNT_CACHE_SEC = 20
 local last_heartbeat_check = 0
 local process_count_cache = { value = 0, at = 0 }
+local start_relay_tcp
+
+local created_dirs = {}
 
 local function ensure_dir(path)
-  windower.create_dir(path:gsub("\\", "/"))
+  path = path:gsub("/", "\\")
+  if path == "" then
+    return
+  end
+
+  local built = ""
+  local drive = path:match("^(%a:)")
+  if drive then
+    built = drive
+    path = path:sub(#drive + 1):gsub("^\\+", "")
+  end
+
+  for part in path:gmatch("[^\\]+") do
+    built = built == "" and part or (built .. "\\" .. part)
+    if not created_dirs[built] then
+      os.execute('if not exist "' .. built .. '" mkdir "' .. built .. '"')
+      created_dirs[built] = true
+    end
+  end
 end
 
 local function refresh_process_count()
@@ -223,6 +246,19 @@ local function queue_to_game(msg)
   append_line(bridge.inbox_path, protocol.encode(msg))
 end
 
+local function append_relay_log(text)
+  if not debug_mode then
+    return
+  end
+
+  local log_path = windower.addon_path .. "data\\pid.log"
+  local file = io.open(log_path, "a")
+  if file then
+    file:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. text .. "\n")
+    file:close()
+  end
+end
+
 local function try_launch_pending_game()
   if bridge.game_launched or not bridge.pending_game_args or not bridge.relay_session_ready then
     return
@@ -235,6 +271,10 @@ local function try_launch_pending_game()
   bridge.launch_attempts = bridge.launch_attempts + 1
   if bridge.launch_game(bridge.pending_game_args) then
     debug_chat("launching duel (" .. bridge.role .. ")...")
+    append_relay_log(string.format(
+      "game-launch role=%s player=%s",
+      tostring(bridge.role),
+      tostring(bridge.local_name)))
     bridge.pending_game_args = nil
   end
 end
@@ -253,6 +293,12 @@ local function send_relay_join()
 
   if ok then
     bridge.join_sent = true
+    append_relay_log(string.format(
+      "relay-join role=%s player=%s session=%s transport=%s",
+      tostring(bridge.role),
+      tostring(bridge.local_name),
+      tostring(bridge.session_id),
+      tostring(bridge.transport)))
     return true
   end
 
@@ -269,10 +315,6 @@ local function handle_tcp_message(msg)
   end
 
   if msg.type == "join_ok" then
-    if bridge.role == "host" and bridge.relay_mode then
-      bridge.relay_session_ready = true
-      try_launch_pending_game()
-    end
     return
   end
 
@@ -291,6 +333,10 @@ local function handle_tcp_message(msg)
       debug_chat("opponent connected.")
       queue_to_game({ type = "peer_connected" })
     end
+    append_relay_log(string.format(
+      "relay-paired role=%s player=%s",
+      tostring(bridge.role),
+      tostring(bridge.local_name)))
     bridge.relay_session_ready = true
     try_launch_pending_game()
     return
@@ -298,6 +344,10 @@ local function handle_tcp_message(msg)
 
   if msg.type == "hello" and bridge.role == "guest" and bridge.relay_mode then
     debug_chat("connected to host.")
+    append_relay_log(string.format(
+      "relay-paired role=%s player=%s (hello)",
+      tostring(bridge.role),
+      tostring(bridge.local_name)))
     bridge.relay_session_ready = true
     queue_to_game(msg)
     try_launch_pending_game()
@@ -433,6 +483,8 @@ function bridge.complete_shutdown(reason, silent)
   bridge.relay_session_ready = false
   bridge.pending_game_args = nil
   bridge.join_sent = false
+  bridge.wss_connecting = false
+  bridge.wss_connect_gen = (bridge.wss_connect_gen or 0) + 1
   bridge.inbox_path = nil
   bridge.outbox_path = nil
   bridge.heartbeat_path = nil
@@ -694,7 +746,7 @@ function bridge.start_guest(session_id, peer_name, host_ip, port, local_name)
   return true
 end
 
-local function start_relay_tcp(local_name, relay_host, port)
+start_relay_tcp = function(local_name, relay_host, port)
   bridge.connect_port = port or protocol.DEFAULT_PORT
   local client = socket.tcp()
   client:settimeout(0)
@@ -737,17 +789,56 @@ function bridge.start_relay(session_id, peer_name, role, relay_host, port, local
   bridge.transport = "wss"
   bridge.connect_host = relay_host
   bridge.connect_port = port or protocol.DEFAULT_WSS_PORT
+  bridge.wss_connecting = true
+  bridge.wss_connect_gen = (bridge.wss_connect_gen or 0) + 1
+  local connect_gen = bridge.wss_connect_gen
 
-  local conn, err = ws_client.connect(relay_host, bridge.connect_port, protocol.DEFAULT_WS_PATH)
-  if not conn then
-    chat("failed to connect to relay (" .. tostring(err) .. ").")
-    bridge.active = false
-    return false
+  debug_chat("connecting to relay wss://" .. relay_host .. protocol.DEFAULT_WS_PATH .. " ...")
+
+  local function finish_wss_connect()
+    if not bridge.active or bridge.wss_connect_gen ~= connect_gen then
+      return
+    end
+
+    bridge.wss_connecting = false
+    local conn, err = ws_client.handshake_blocking(relay_host, bridge.connect_port, protocol.DEFAULT_WS_PATH)
+    if not bridge.active or bridge.wss_connect_gen ~= connect_gen then
+      if conn then
+        ws_client.close(conn)
+      end
+      return
+    end
+
+    if not conn then
+      append_relay_log(string.format(
+        "relay-wss-failed role=%s player=%s err=%s",
+        tostring(bridge.role),
+        tostring(bridge.local_name),
+        tostring(err)))
+      chat("failed to connect to relay (" .. tostring(err) .. ").")
+      bridge.shutdown("connection_closed")
+      return
+    end
+
+    bridge.ws_conn = conn
+    debug_chat("relay connected.")
+    send_relay_join()
+    drain_tcp_inbox()
   end
 
-  bridge.ws_conn = conn
-  debug_chat("connecting to relay wss://" .. relay_host .. protocol.DEFAULT_WS_PATH .. " ...")
-  return true
+  if coroutine and coroutine.schedule then
+    coroutine.schedule(finish_wss_connect, 0)
+    return true
+  end
+
+  finish_wss_connect()
+  return bridge.ws_conn ~= nil
+end
+
+function bridge.cancel_relay_session()
+  if bridge.active and bridge.relay_mode and not bridge.game_launched then
+    bridge.shutdown("restart")
+  end
 end
 
 function bridge.launch_game(args)
@@ -764,6 +855,8 @@ function bridge.launch_game(args)
 
   if not bridge.active then
     -- Solo play: skip tasklist (avoids flashing console windows during monitoring).
+  elseif bridge.relay_mode then
+    -- Relay duel: each Windower instance launches at most one game.
   else
     invalidate_process_count()
     local running = count_running_games()
@@ -774,12 +867,27 @@ function bridge.launch_game(args)
     end
   end
 
-  local cmd = 'start "" /MIN "' .. path .. '"'
-  for _, v in ipairs(args) do
-    cmd = cmd .. ' "' .. tostring(v):gsub('"', '') .. '"'
+  local launch_args = { '--addon-path', windower.addon_path:gsub('\\', '/') }
+
+  local player = windower.ffxi.get_player()
+  if player and player.name and player.name ~= '' then
+    launch_args[#launch_args + 1] = '--player-name'
+    launch_args[#launch_args + 1] = player.name
   end
 
-  os.execute(cmd)
+  for _, v in ipairs(args or {}) do
+    launch_args[#launch_args + 1] = v
+  end
+
+  if windower.execute then
+    windower.execute(path, launch_args)
+  else
+    local cmd = 'start "" "' .. path .. '"'
+    for _, v in ipairs(launch_args) do
+      cmd = cmd .. ' "' .. tostring(v):gsub('"', '') .. '"'
+    end
+    os.execute(cmd)
+  end
 
   bridge.game_launched = true
   bridge.launch_time = os.time()
@@ -877,18 +985,9 @@ function bridge.tick()
   end
 
   if bridge.ws_conn then
-    if not bridge.ws_conn.handshake_done then
-      local ready, err = ws_client.tick_handshake(bridge.ws_conn)
-      if err then
-        chat("relay websocket handshake failed (" .. tostring(err) .. ").")
-        bridge.shutdown("connection_closed")
-        return
-      end
-    else
-      ws_client.flush_send(bridge.ws_conn)
-    end
+    ws_client.flush_send(bridge.ws_conn)
 
-    if bridge.ws_conn.handshake_done and bridge.relay_mode and not bridge.join_sent then
+    if bridge.relay_mode and not bridge.join_sent then
       send_relay_join()
     end
   end

@@ -2,8 +2,8 @@ sounds = {}
 
 local SFX_PATH = "assets/sound/wav/"
 local MUSIC_PATH = "assets/sound/"
-local MUSIC_VOLUME = 0.45 * 0.7
-local SFX_VOLUME = 0.4
+local MUSIC_VOLUME = 0.25
+local SFX_VOLUME = 0.3
 
 local sfx_files = {
   card_battle = "snd_card_battle.wav",

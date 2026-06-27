@@ -5,6 +5,7 @@ require("battle")
 require("capture_fx")
 require("place_card")
 require("init")
+require("characters")
 require("input")
 require("coin_toss")
 require("end_game_text")
@@ -28,9 +29,33 @@ local function log_boot_error(err)
   log_runtime_error(err)
 end
 
+player_settings = { character = "random" }
+addon_root = nil
+launch_player_name = nil
+
+local function parse_launch_args(argv)
+  local args = argv or arg or {}
+  for i = 1, #args - 1 do
+    if args[i] == "--addon-path" then
+      addon_root = args[i + 1]
+    elseif args[i] == "--player-name" then
+      launch_player_name = args[i + 1]
+    end
+  end
+end
+
+parse_launch_args(arg)
+
+local function load_player_settings()
+  if addon_root then
+    player_settings = require("player_settings").load(addon_root, launch_player_name)
+  end
+end
+
 function love.load()
   local ok, err = pcall(function()
     math.randomseed(os.time())
+    load_player_settings()
     duel_init_from_args(arg)
     Game = Game()
 
@@ -72,6 +97,10 @@ function love.update(dt)
     end
 
     Game:update(dt)
+
+    if is_duel_active() then
+      duel_try_finish_game_over(Game)
+    end
   end)
 
   if not ok then
